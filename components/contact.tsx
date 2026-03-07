@@ -168,7 +168,7 @@ export function Contact() {
                 rel="noopener noreferrer"
                 className="text-foreground hover:underline"
               >
-                @@loxcalhost_contact_bot
+                @loxcalhost_contact_bot
               </a>
             </p>
           </div>
