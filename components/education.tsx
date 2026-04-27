@@ -17,8 +17,8 @@ export function Education() {
   ];
 
   return (
-    <section id="education" className="py-20 border-t border-border">
-      <div className="max-w-2xl mx-auto px-6">
+    <section id="education" className="py-16 sm:py-20 border-t border-border">
+      <div className="max-w-2xl mx-auto px-4 sm:px-6">
         <h2 className="text-3xl md:text-4xl font-serif font-bold text-foreground mb-8">
           Education
         </h2>
@@ -29,8 +29,8 @@ export function Education() {
               key={idx}
               className="border-l-2 border-foreground/30 pl-6 pb-1"
             >
-              <div className="flex justify-between items-start mb-2">
-                <div>
+              <div className="flex flex-wrap justify-between items-start gap-2 mb-2">
+                <div className="min-w-0 flex-1">
                   <h3 className="text-lg font-semibold text-foreground">
                     {edu.degree}
                   </h3>

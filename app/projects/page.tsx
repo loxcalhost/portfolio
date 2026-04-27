@@ -1,12 +1,16 @@
 import Link from "next/link";
 import { Navigation } from "@/components/navigation";
 import { Footer } from "@/components/footer";
+import { buildMetadata } from "@/lib/seo";
 
-export const metadata = {
-  title: "All Projects | Security Researcher",
+export const metadata = buildMetadata({
+  title: "All Projects | loxcalhost",
   description:
     "A comprehensive collection of security projects including vulnerability scanners, CTF solutions, and reverse engineering tools.",
-};
+  path: "/projects",
+  ogTitle: "All Projects",
+  ogSubtitle: "Security tools · Scripts · Research",
+});
 
 export default function ProjectsPage() {
   const projects = [

@@ -18,9 +18,9 @@ export function Projects() {
   return (
     <section
       id="projects"
-      className="py-20 border-t border-border hover:cursor-not-allowed"
+      className="py-16 sm:py-20 border-t border-border hover:cursor-not-allowed"
     >
-      <div className="max-w-2xl mx-auto px-6">
+      <div className="max-w-2xl mx-auto px-4 sm:px-6">
         <h2 className="text-3xl md:text-4xl font-serif font-bold text-foreground mb-8">
           Projects
         </h2>
@@ -29,9 +29,9 @@ export function Projects() {
           {topProjects.map((project, idx) => (
             <div
               key={idx}
-              className="p-6 border border-border hover:border-foreground/50 hover:bg-secondary/10 transition-all duration-200"
+              className="p-5 sm:p-6 border border-border hover:border-foreground/50 hover:bg-secondary/10 transition-all duration-200"
             >
-              <div className="flex justify-between items-start mb-3">
+              <div className="flex flex-wrap justify-between items-start gap-2 mb-3">
                 <h3 className="text-lg font-semibold text-foreground">
                   {project.title}
                 </h3>

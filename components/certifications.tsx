@@ -9,8 +9,11 @@ export function Certifications() {
   ];
 
   return (
-    <section id="certifications" className="py-20 border-t border-border">
-      <div className="max-w-2xl mx-auto px-6">
+    <section
+      id="certifications"
+      className="py-16 sm:py-20 border-t border-border"
+    >
+      <div className="max-w-2xl mx-auto px-4 sm:px-6">
         <h2 className="text-3xl md:text-4xl font-serif font-bold text-foreground mb-8">
           Certifications
         </h2>
@@ -19,10 +22,10 @@ export function Certifications() {
           {certs.map((cert, idx) => (
             <div
               key={idx}
-              className="p-6 border border-border hover:border-foreground/50 hover:bg-secondary/10 transition-all"
+              className="p-5 sm:p-6 border border-border hover:border-foreground/50 hover:bg-secondary/10 transition-all"
             >
-              <div className="flex justify-between items-start">
-                <div>
+              <div className="flex flex-wrap justify-between items-start gap-3">
+                <div className="min-w-0 flex-1">
                   <h3 className="text-lg font-semibold text-foreground mb-1">
                     {cert.name}
                   </h3>

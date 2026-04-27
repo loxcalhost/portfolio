@@ -4,7 +4,7 @@ export const frontmatter = {
   category: "HTB Challenge",
   description:
     "Complete Hack The Box SpookyPass writeup. Learn basic reverse engineering techniques like extracting hardcoded passwords from binaries using strings.",
-  date: "2025-03-06",
+  date: "2026-04-27",
 };
 
 export const metadata = {
@@ -14,10 +14,11 @@ export const metadata = {
 };
 
 Unzip the file with `unzip -P ██████████ SpookyPass.zip`:
+
 ```
 Archive:  SpookyPass.zip
    creating: rev_spookypass/
-  inflating: rev_spookypass/pass 
+  inflating: rev_spookypass/pass
 ```
 
 > NOTE: Grab password for the zip file from the challenge web page
@@ -25,27 +26,31 @@ Archive:  SpookyPass.zip
 Change directory to `rev_spookypass` with `cd rev_spookypass`
 
 Lists its content with `ls`
+
 ```
 pass
 ```
 
 With `file` command we can determine file type as `file pass`:
+
 ```
 pass: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=3008217772cc2426c643d69b80a96c715490dd91, for GNU/Linux 4.4.0, not stripped
 ```
 
 Which shows us that its a executable file which can be executed with `./pass`:
+
 ```
 Welcome to the SPOOKIEST party of the year.
-Before we let you in, you'll need to give us the password: 
+Before we let you in, you'll need to give us the password:
 ```
 
 Which asks for a password, but since this is a binary, directly viewing it with `cat` produces unreadable output. Instead, we can extract human-readable strings using `strings`:
+
 ```
-/lib64/ld-linux-x86-64.so.2                                                                                                                                      
-fgets  
+/lib64/ld-linux-x86-64.so.2
+fgets
 ...<SNIP>...
-Before we let you in, you'll need to give us the password:                                                                                                       
+Before we let you in, you'll need to give us the password:
 s3█████████████████████████████l5
 ...<SNIP>...
 .bss
@@ -57,6 +62,7 @@ The string `s3██████████████████████
 > **NOTE** `strings` worked because binaries often store readable text and passwords are sometimes hardcoded
 
 Copy the retrieved password to your clipboard, and execute the binary with `./pass`
+
 ```
 Welcome to the SPOOKIEST party of the year.
 Before we let you in, you'll need to give us the password: s3█████████████████████████████l5

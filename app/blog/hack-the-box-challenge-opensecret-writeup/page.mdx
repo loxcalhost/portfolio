@@ -1,6 +1,6 @@
 export const frontmatter = {
   title: "Hack The Box OpenSecret Machine Writeup",
-  slug: "hack-the-box-opensecret-machine-writeup",
+  slug: "hack-the-box-challenge-opensecret-writeup",
   category: "HTB Machine",
   description:
     "Complete Hack The Box OpenSecret writeup for beginners. Learn how exposed JWT secret keys in client-side code lead to authentication bypass and flag disclosure.",
@@ -20,7 +20,8 @@ It will load **OpenSecret Helpdesk**
 To view its source code press `CTRL+U`
 
 Upon analyzing the source code you will notice a `const` named `SECRET_KEY`:
-```  
+
+```
 ...<SNIP>...
         <script>
             // JWT Secret Key

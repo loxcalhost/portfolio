@@ -1,6 +1,42 @@
 "use client";
 
 import { useState } from "react";
+import { Check, Copy } from "lucide-react";
+
+function CopyHandle({ label, value }: { label: string; value: string }) {
+  const [copied, setCopied] = useState(false);
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // ignore
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={copy}
+      aria-label={`Copy ${label}`}
+      className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors align-middle"
+    >
+      {copied ? (
+        <>
+          <Check className="w-3.5 h-3.5" />
+          <span className="text-xs">Copied!</span>
+        </>
+      ) : (
+        <>
+          <Copy className="w-3.5 h-3.5" />
+          <span className="text-xs">Copy</span>
+        </>
+      )}
+    </button>
+  );
+}
 
 export function Contact() {
   const [isLoading, setIsLoading] = useState(false);
@@ -37,8 +73,8 @@ export function Contact() {
   }
 
   return (
-    <section id="contact" className="py-20 border-t border-border">
-      <div className="max-w-2xl mx-auto px-6">
+    <section id="contact" className="py-16 sm:py-20 border-t border-border">
+      <div className="max-w-2xl mx-auto px-4 sm:px-6">
         <h2 className="text-3xl md:text-4xl font-serif font-bold text-foreground mb-8">
           Contact
         </h2>
@@ -138,15 +174,17 @@ export function Contact() {
             Other ways to connect
           </h3>
           <div className="space-y-2 text-sm text-muted-foreground">
-            <p>
-              Email:{" "}
-              <a
-                href="mailto:loxcalhost@protonmail.com"
-                className="text-foreground hover:underline"
-              >
-                loxcalhost@protonmail.com
-                {/* vinod@protonmail.com */}
-              </a>
+            <p className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <span>
+                Email:{" "}
+                <a
+                  href="mailto:loxcalhost@protonmail.com"
+                  className="text-foreground hover:underline"
+                >
+                  loxcalhost@protonmail.com
+                </a>
+              </span>
+              <CopyHandle label="email" value="loxcalhost@protonmail.com" />
             </p>
             <p>
               GitHub:{" "}
@@ -157,19 +195,24 @@ export function Contact() {
                 className="text-foreground hover:underline"
               >
                 github.com/loxcalhost
-                {/* github.com/vinod */}
               </a>
             </p>
-            <p>
-              Telegram:{" "}
-              <a
-                href="https://t.me/loxcalhost"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-foreground hover:underline"
-              >
-                @loxcalhost_contact_bot
-              </a>
+            <p className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <span>
+                Telegram:{" "}
+                <a
+                  href="https://t.me/loxcalhost"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-foreground hover:underline"
+                >
+                  @loxcalhost_contact_bot
+                </a>
+              </span>
+              <CopyHandle
+                label="Telegram handle"
+                value="@loxcalhost_contact_bot"
+              />
             </p>
           </div>
         </div>
