@@ -1,0 +1,37 @@
+export const frontmatter = {
+  title: "Hack The Box OpenSecret Machine Writeup",
+  slug: "hack-the-box-opensecret-machine-writeup",
+  category: "HTB Machine",
+  description:
+    "Complete Hack The Box OpenSecret writeup for beginners. Learn how exposed JWT secret keys in client-side code lead to authentication bypass and flag disclosure.",
+  date: "2025-04-27",
+};
+
+export const metadata = {
+  title: "HackTheBox OpenSecret Writeup",
+  description:
+    "Step-by-step HackTheBox OpenSecret writeup. Discover how a JWT secret key exposed in client-side source code allows attackers to forge tokens and retrieve the flag.",
+};
+
+Visit the challenge IP address in your browser.
+
+It will load **OpenSecret Helpdesk**
+
+To view its source code press `CTRL+U`
+
+Upon analyzing the source code you will notice a `const` named `SECRET_KEY`:
+```  
+...<SNIP>...
+        <script>
+            // JWT Secret Key
+            const SECRET_KEY = "HTB{████████████████████████████}";
+...<SNIP>...
+                });
+        </script>
+```
+
+This reveals a critical security flaw: the secret key used for signing JWT tokens is exposed on the client side.
+
+Since JWT authentication depends on keeping the secret key confidential, an attacker could use this key to forge valid tokens and potentially escalate privileges.
+
+In this case, the flag is directly exposed within the source code, making it trivial to retrieve.
