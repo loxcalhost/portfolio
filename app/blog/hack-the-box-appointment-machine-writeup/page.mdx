@@ -1,0 +1,78 @@
+export const frontmatter = {
+  title: "Hack The Box Appointment Writeup",
+  slug: "hack-the-box-appointment-writeup",
+  category: "HTB Machine",
+  description:
+    "Complete Hack The Box Appointment writeup. Learn web enumeration, authentication bypass using SQL injection, and exploiting insecure login forms.",
+  date: "2026-05-11",
+};
+
+export const metadata = {
+  title: "Hack The Box Appointment Writeup | loxcalhost",
+  description:
+    "Step-by-step Hack The Box Appointment writeup covering Apache web enumeration, SQL injection authentication bypass, and retrieving the flag from a vulnerable login portal.",
+};
+
+## Introduction
+
+In this write-up, we will solve the “Appointment” machine from the Hack The Box Starting Point series by performing basic enumeration and exploiting common vulnerabilities to gain access to the target system.
+
+## Setup
+
+Download a VPN configuration file from the webpage and connect to it via `sudo openvpn file.ovpn`.
+
+> **NOTE:** Replace `file.ovpn` with your VPN configuration file name.
+
+To verify the connectivity and availability of the target, we can run the ping command with the IP address of the target machine.
+
+## Enumeration
+
+Run `nmap -sV <ip_addr>` to scan the target for open ports and service versions:
+
+```
+Starting Nmap 7.95 ( https://nmap.org ) at 2026-05-08 14:58 IST
+Nmap scan report for 10.129.142.25
+Host is up (0.17s latency).
+Not shown: 999 closed tcp ports (reset)
+PORT   STATE SERVICE VERSION
+80/tcp open  http    Apache httpd 2.4.38
+Service Info: Host: 127.0.0.1
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 39.42 seconds
+```
+
+The scan results indicate that port `80` is running an `Apache` web server. Navigating to `http://<ip_addr>` in the browser presents a login page, suggesting that the web application may be the primary attack surface.
+
+## Exploitation
+
+Since the target presents a login form, we first attempted several common default credential combinations such as:
+
+```
+admin:admin
+guest:guest
+user:user
+root:root
+administrator:password
+```
+
+None of these credentials were successful. With default logins ruled out, the next step was to test the authentication form for a possible SQL Injection vulnerability.
+
+> **NOTE:** In MySQL, the `#` character is used to comment out the remainder of a query.
+
+Using this knowledge, we can attempt a basic SQL Injection by entering the following payload in the username field while leaving the password field blank:
+
+```
+Username: admin'#
+Password:
+```
+
+This payload may cause the application to ignore the password check entirely, potentially allowing authentication as the `admin` user.
+
+Upon successful exploitation, the webpage displays the flag:
+
+```
+Congratulations!
+
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
