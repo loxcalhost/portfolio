@@ -1,0 +1,140 @@
+export const frontmatter = {
+  title: "Hack The Box BabyEncryption Challenge Writeup",
+  slug: "hack-the-box-babyencryption-writeup",
+  category: "HTB Challenge",
+  description:
+    "Complete Hack The Box BabyEncryption challenge writeup. Learn how modular arithmetic and multiplicative inverses are used to decrypt the encrypted flag.",
+  date: "2026-05-23",
+};
+
+export const metadata = {
+  title: "Hack The Box BabyEncryption Writeup | loxcalhost",
+  description:
+    "Step-by-step Hack The Box BabyEncryption solution. Understand the custom Python encryption script, reverse the cipher using modular inverse, and recover the flag.",
+};
+
+Download and unzip the file with `unzip -P ▇▇▇▇▇▇▇▇▇▇ BabyEncryption/.zip`:
+
+Navigate to `BabyEncryption` with `cd BabyEncryption/`
+
+We are given two files: one contains an encrypted message and the other contains the encryption logic.
+
+Encryption code from `chall.py`
+```
+import string
+from secret import MSG
+
+def encryption(msg):
+    ct = []
+    for char in msg:
+        ct.append((123 * char + 18) % 256)
+    return bytes(ct)
+
+ct = encryption(MSG)
+f = open('./msg.enc','w')
+f.write(ct.hex())
+f.close()
+```
+
+**Code Breakdown**
+
+```
+import string
+from secret import MSG
+```
+
+This imports Python’s built-in `string` module, although it is not used in the script.
+
+The statement `from secret import MSG` imports the variable `MSG` from a file named `secret.py`.
+
+> **Note:** The file `secret.py` is not included in the provided zip and is likely used internally to store the original message.
+
+```
+def encryption(msg):
+    ct = []
+    for char in msg:
+        ct.append((123 * char + 18) % 256)
+    return bytes(ct)
+```
+
+The function `encryption(msg)` takes `msg` as input and initializes an empty list ct to store encrypted values.
+
+A `for` loop iterates over each byte (`char`) in `msg`. For each value, the encryption formula `(123 * char + 18) % 256` is applied. This means the byte is first multiplied by 123, then 18 is added, and finally the result is reduced modulo 256 to keep it within the byte range (0–255).
+
+Each encrypted value is appended to the list `ct`. Finally, the list is converted into a bytes object using `bytes(ct)` and returned.
+
+```
+ct = encryption(MSG)
+f = open('./msg.enc','w')
+f.write(ct.hex())
+f.close()
+```
+
+The function `encryption(MSG)` is called to encrypt the original message, and the result is stored in the variable `ct`.
+
+A file named `msg.enc` is then opened in write mode (`'w'`). The encrypted bytes stored in ct are converted into a hexadecimal string using `.hex()` and written into the file.
+
+Finally, the file is closed using `f.close()` to ensure the data is properly saved.
+
+Now, convert the hex-encoded file back into raw bytes for decryption with `xxd -r -p enc_msg > ct.bin`
+
+And save the below decryption code as `decrypt.py`
+```
+with open("ct.bin", "rb") as file:
+    ct = file.read()
+
+inv = pow(123, -1, 256)
+
+pt = []
+for y in ct:
+    x = ((y - 18) * inv) % 256
+    pt.append(x)
+
+pt = bytes(pt)
+
+print(pt)
+```
+
+**Code Breakdown**
+
+```
+with open("ct.bin", "rb") as file:
+    ct = file.read()
+```
+`with open("ct.bin", "rb") as file:` opens the `ct.bin` file in **binary read mode** **`rb`** and second line reads entire file content and store it in `ct`, now `ct` contains encrypted data as a `bytes object`, which allows us to process each byte during decryption.
+
+> **NOTE:** We need binary mode (`b`) here because our file contains **encrypted bytes**, not text
+
+```
+inv = pow(123, -1, 256)
+```
+In Python, `pow(a, b, m)` usually means `$a^b$ mod m`, so when `b= -1` Python computes the modular inverse of `a` mod `m`. So, `pow(123, -1, 256)` means find number `inv` such that `(123 × inv) % 256 = 1`
+
+Therefore, our decryption becomes, `x = ((y - 18) * inv) % 256`
+
+```
+pt = []
+for y in ct:
+    x = ((y - 18) * inv) % 256
+    pt.append(x)
+```
+`pt = []` is used to create an empty list that will store **decrypted byte values**
+
+A `for` loop iterates over each byte `y` in `ct`, and the decryption operation is applied to recover the original byte.
+
+`pt.append(x)` this adds the decrypted byte `x` to the list
+
+```
+pt = bytes(pt)
+
+print(pt)
+```
+
+`pt = bytes(pt)` here `bytes(pt)` converts the list into **byte objects**
+
+`print(pt)` prints the byte string
+
+To get the flag, run `python decrypt.py`, so we get:
+```
+b'Th3 nucl34r w1ll 4rr1v3 0n fr1d4y.\nHTB{▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇}'
+```
