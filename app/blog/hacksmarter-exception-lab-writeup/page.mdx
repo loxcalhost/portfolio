@@ -365,11 +365,20 @@ To secure the system against the attacks demonstrated in this chain, the followi
 
 ## MITRE ATT&CK Mapping
 
-Tactic | Technique | ID | Description
-------|----------|----|------------
-Reconnaissance | Active Scanning | T1595 | Scanning ports and enumerating software versions via Nmap.
-Initial Access | Exploit Public-Facing Application | T1190 | Exploiting the Rocket.Chat NoSQL injection vulnerability.
-Credential Access | Steal Web Session Cookie/Token | T1539 | Extracting password reset tokens and TOTP secrets via database injection.
-Execution | Command and Scripting Interpreter | T1059 | Using the Rocket.Chat webhook integration to execute a Node.js shell.
-Lateral Movement | Remote Services: SSH | T1021.004 | Reusing exposed credentials to authenticate via SSH.
-Privilege Escalation | Abuse Elevation Control Mechanism | T1548.003 | Exploiting sudo privileges on a binary that calls an interactive text editor.
+1. **Reconnaissance** 
+- T1595 - Scanning ports and enumerating software versions via Nmap.
+
+2. **Initial Access**
+- T1190 - Exploiting the Rocket.Chat NoSQL injection vulnerability.
+
+3. **Credential Access**
+- T1539 - Extracting password reset tokens and TOTP secrets via database injection.
+
+4. **Execution**
+- T1059 - Using the Rocket.Chat webhook integration to execute a Node.js shell.
+
+5. **Lateral Movement** 
+- T1021.004 - Reusing exposed credentials to authenticate via SSH.
+
+- **Privilege Escalation**
+- T1548.003 - Exploiting sudo privileges on a binary that calls an interactive text editor.
