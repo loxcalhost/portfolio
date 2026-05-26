@@ -1,6 +1,6 @@
 export const frontmatter = {
   title: "Hack The Box BabyEncryption Challenge Writeup",
-  slug: "hack-the-box-babyencryption-writeup",
+  slug: "hack-the-box-baby-encryption-writeup",
   category: "HTB Challenge",
   description:
     "Complete Hack The Box BabyEncryption challenge writeup. Learn how modular arithmetic and multiplicative inverses are used to decrypt the encrypted flag.",
@@ -20,6 +20,7 @@ Navigate to `BabyEncryption` with `cd BabyEncryption/`
 We are given two files: one contains an encrypted message and the other contains the encryption logic.
 
 Encryption code from `chall.py`
+
 ```
 import string
 from secret import MSG
@@ -79,6 +80,7 @@ Finally, the file is closed using `f.close()` to ensure the data is properly sav
 Now, convert the hex-encoded file back into raw bytes for decryption with `xxd -r -p enc_msg > ct.bin`
 
 And save the below decryption code as `decrypt.py`
+
 ```
 with open("ct.bin", "rb") as file:
     ct = file.read()
@@ -101,6 +103,7 @@ print(pt)
 with open("ct.bin", "rb") as file:
     ct = file.read()
 ```
+
 `with open("ct.bin", "rb") as file:` opens the `ct.bin` file in **binary read mode** **`rb`** and second line reads entire file content and store it in `ct`, now `ct` contains encrypted data as a `bytes object`, which allows us to process each byte during decryption.
 
 > **NOTE:** We need binary mode (`b`) here because our file contains **encrypted bytes**, not text
@@ -108,6 +111,7 @@ with open("ct.bin", "rb") as file:
 ```
 inv = pow(123, -1, 256)
 ```
+
 In Python, `pow(a, b, m)` usually means `$a^b$ mod m`, so when `b= -1` Python computes the modular inverse of `a` mod `m`. So, `pow(123, -1, 256)` means find number `inv` such that `(123 × inv) % 256 = 1`
 
 Therefore, our decryption becomes, `x = ((y - 18) * inv) % 256`
@@ -118,6 +122,7 @@ for y in ct:
     x = ((y - 18) * inv) % 256
     pt.append(x)
 ```
+
 `pt = []` is used to create an empty list that will store **decrypted byte values**
 
 A `for` loop iterates over each byte `y` in `ct`, and the decryption operation is applied to recover the original byte.
@@ -135,6 +140,7 @@ print(pt)
 `print(pt)` prints the byte string
 
 To get the flag, run `python decrypt.py`, so we get:
+
 ```
 b'Th3 nucl34r w1ll 4rr1v3 0n fr1d4y.\nHTB{▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇}'
 ```
