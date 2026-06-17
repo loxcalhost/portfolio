@@ -5,7 +5,7 @@ export const SITE = {
   author: "Vinod Vyavhare",
   description:
     "Security researcher and ethical hacker. CTF player writing about penetration testing, web security, and reverse engineering.",
-  url: "https://loxcalhost.netlify.",
+  url: "https://loxcalhost.netlify.app",
   twitter: "@loxcalhost",
 } as const;
 

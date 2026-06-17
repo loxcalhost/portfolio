@@ -109,37 +109,42 @@ export function ArticlesList({ articles, tags }: Props) {
               </button>
             </div>
           )}
-          {filtered.map((article) => (
-            <Link
-              key={article.slug}
-              href={`/blog/${article.slug}`}
-              className="block group p-5 sm:p-6 border border-border hover:border-foreground/50 hover:bg-secondary/10 transition-all duration-200"
-            >
-              <div className="flex flex-wrap justify-between items-start gap-2 mb-2">
-                <h3 className="text-base sm:text-lg font-semibold text-foreground group-hover:underline break-words min-w-0 flex-1">
-                  {article.title}
-                </h3>
-                <span className="text-xs px-3 py-1 bg-secondary/20 text-muted-foreground rounded whitespace-nowrap">
-                  {article.category}
-                </span>
-              </div>
-              <p className="text-sm text-muted-foreground mb-3">
-                {article.description}
-              </p>
-              {article.tags.length > 0 && (
-                <div className="flex flex-wrap gap-2">
-                  {article.tags.map((t) => (
-                    <span
-                      key={t}
-                      className="text-[11px] px-2 py-0.5 bg-secondary/30 text-muted-foreground rounded"
-                    >
-                      #{t}
-                    </span>
-                  ))}
+          {filtered.map((article) => {
+            const isPdf = !!article.pdfUrl;
+            return (
+              <Link
+                key={article.slug}
+                href={article.pdfUrl || `/blog/${article.slug}`}
+                target={isPdf ? "_blank" : undefined}
+                rel={isPdf ? "noopener noreferrer" : undefined}
+                className="block group p-5 sm:p-6 border border-border hover:border-foreground/50 hover:bg-secondary/10 transition-all duration-200"
+              >
+                <div className="flex flex-wrap justify-between items-start gap-2 mb-2">
+                  <h3 className="text-base sm:text-lg font-semibold text-foreground group-hover:underline break-words min-w-0 flex-1">
+                    {article.title}
+                  </h3>
+                  <span className="text-xs px-3 py-1 bg-secondary/20 text-muted-foreground rounded whitespace-nowrap">
+                    {article.category}
+                  </span>
                 </div>
-              )}
-            </Link>
-          ))}
+                <p className="text-sm text-muted-foreground mb-3">
+                  {article.description}
+                </p>
+                {article.tags.length > 0 && (
+                  <div className="flex flex-wrap gap-2">
+                    {article.tags.map((t) => (
+                      <span
+                        key={t}
+                        className="text-[11px] px-2 py-0.5 bg-secondary/30 text-muted-foreground rounded"
+                      >
+                        #{t}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </Link>
+            );
+          })}
         </div>
       </div>
     </section>

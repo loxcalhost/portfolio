@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import {
   ArrowLeft,
   Calendar,
@@ -36,6 +36,12 @@ export function ArticleChrome({ posts, children }: Props) {
     () => posts.find((p) => p.slug === slug) ?? null,
     [posts, slug],
   );
+
+  useEffect(() => {
+    if (post?.pdfUrl) {
+      window.location.replace(post.pdfUrl);
+    }
+  }, [post]);
 
   const [copied, setCopied] = useState(false);
 

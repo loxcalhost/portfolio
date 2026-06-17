@@ -9,6 +9,7 @@ export type BlogPost = {
   date?: string;
   tags: string[];
   readingTimeMinutes: number;
+  pdfUrl?: string;
 };
 
 function parseFrontmatter(content: string): Record<string, string> {
@@ -103,6 +104,9 @@ export function getAllBlogPosts(): BlogPost[] {
       date: frontmatter.date,
       tags: parseTags(frontmatter),
       readingTimeMinutes: estimateReadingTime(content),
+      pdfUrl: frontmatter.pdfUrl
+        ? (frontmatter.pdfUrl.startsWith("/") ? frontmatter.pdfUrl : `/blog/${entry.name}/pdf/${frontmatter.pdfUrl}`)
+        : undefined,
     });
   }
 

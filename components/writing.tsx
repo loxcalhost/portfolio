@@ -17,25 +17,30 @@ export function Writing() {
           </p>
         ) : (
           <div className="space-y-6 mb-8">
-            {recentArticles.map((article) => (
-              <Link
-                key={article.slug}
-                href={`/blog/${article.slug}`}
-                className="block group p-5 sm:p-6 border border-border hover:border-foreground/50 hover:bg-secondary/10 transition-all duration-200"
-              >
-                <div className="flex flex-wrap justify-between items-start gap-2 mb-2">
-                  <h3 className="text-base sm:text-lg font-semibold text-foreground group-hover:underline break-words min-w-0 flex-1">
-                    {article.title}
-                  </h3>
-                  <span className="text-xs px-3 py-1 bg-secondary/20 text-muted-foreground rounded whitespace-nowrap">
-                    {article.category}
-                  </span>
-                </div>
-                <p className="text-sm text-muted-foreground">
-                  {article.description}
-                </p>
-              </Link>
-            ))}
+            {recentArticles.map((article) => {
+              const isPdf = !!article.pdfUrl;
+              return (
+                <Link
+                  key={article.slug}
+                  href={article.pdfUrl || `/blog/${article.slug}`}
+                  target={isPdf ? "_blank" : undefined}
+                  rel={isPdf ? "noopener noreferrer" : undefined}
+                  className="block group p-5 sm:p-6 border border-border hover:border-foreground/50 hover:bg-secondary/10 transition-all duration-200"
+                >
+                  <div className="flex flex-wrap justify-between items-start gap-2 mb-2">
+                    <h3 className="text-base sm:text-lg font-semibold text-foreground group-hover:underline break-words min-w-0 flex-1">
+                      {article.title}
+                    </h3>
+                    <span className="text-xs px-3 py-1 bg-secondary/20 text-muted-foreground rounded whitespace-nowrap">
+                      {article.category}
+                    </span>
+                  </div>
+                  <p className="text-sm text-muted-foreground">
+                    {article.description}
+                  </p>
+                </Link>
+              );
+            })}
           </div>
         )}
 
