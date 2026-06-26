@@ -39,12 +39,12 @@ Orion is a Linux-based target that highlights the severe risks associated with o
 ## Setup
 
 First, download the VPN configuration file from the platform and establish a connection using OpenVPN:
-```bash
+```
 sudo openvpn machines_au-2.ovpn
 ```
 
 To confirm that the target machine is reachable across the VPN, we can send a few ICMP echo requests:
-```bash
+```
 $ ping -c 4 10.129.102.73
 
 PING 10.129.110.144 (10.129.110.144) 56(84) bytes of data.
@@ -72,7 +72,7 @@ Once this entry is added, refreshing the browser allows the domain to resolve pr
 ## Enumeration
 
 We begin our enumeration with a port scan using Nmap to identify open ports and the services running on the target machine:
-```bash
+```
 $ nmap -sV 10.129.110.144
 
 Starting Nmap 7.95 ( https://nmap.org ) at 2026-06-26 13:55 IST
