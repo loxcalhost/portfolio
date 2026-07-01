@@ -1,0 +1,133 @@
+export const frontmatter = {
+  title: "Hack The Box Cap Machine Writeup",
+  slug: "hack-the-box-cap-machine-writeup",
+  category: "HTB Machine",
+  description:
+    "Complete walkthrough of the Hack The Box Cap machine, covering exploitation of an IDOR vulnerability to obtain packet captures, extraction of FTP credentials from network traffic, SSH access through password reuse, and root privilege escalation via the Dirty Frag Linux kernel vulnerability.",
+  date: "2026-07-01",
+};
+
+export const metadata = {
+  title:
+    "Hack The Box Cap Writeup | IDOR to Root via Dirty Frag Kernel Exploit | loxcalhost",
+  description:
+    "Step-by-step Hack The Box Cap writeup demonstrating exploitation of an IDOR vulnerability to retrieve PCAP files, recovery of FTP credentials using Wireshark, password reuse for SSH access, and privilege escalation through the Dirty Frag Linux kernel vulnerability.",
+};
+
+## Introduction
+
+This write-up documents the compromise of the **Cap** Linux host, beginning with external reconnaissance and ending with full root compromise. The attack chain leveraged an Insecure Direct Object Reference (IDOR) vulnerability to access another user's network capture, exposing FTP credentials transmitted in cleartext. Those credentials were then reused to obtain SSH access, followed by local privilege escalation through a vulnerable Linux kernel.
+
+## Attack Chain
+
+1. Enumerated the target and identified the exposed FTP, SSH, and HTTP services.
+2. Discovered an IDOR vulnerability in the `/data/<id>` endpoint.
+3. Downloaded another user's packet capture (`0.pcap`) via the IDOR.
+4. Analyzed the PCAP in Wireshark and recovered FTP credentials transmitted in cleartext.
+5. Authenticated to the FTP service and confirmed the recovered credentials.
+6. Reused the same credentials to obtain SSH access as the `nathan` user.
+7. Identified a vulnerable Linux kernel version through local enumeration.
+8. Exploited the **Dirty Frag** local privilege escalation vulnerability to obtain root access.
+
+## Setup
+
+First, download the VPN configuration file from the platform and establish a connection using OpenVPN:
+```
+sudo openvpn release_arena_au-release-1.ovpn
+```
+
+To confirm that the target machine is reachable across the VPN, we can send a few ICMP echo requests:
+```
+$ ping -c 4 10.129.112.12
+
+PING 10.129.112.12 (10.129.112.12) 56(84) bytes of data.
+64 bytes from 10.129.112.12: icmp_seq=1 ttl=63 time=334 ms
+64 bytes from 10.129.112.12: icmp_seq=2 ttl=63 time=304 ms
+64 bytes from 10.129.112.12: icmp_seq=3 ttl=63 time=512 ms
+64 bytes from 10.129.112.12: icmp_seq=4 ttl=63 time=331 ms
+
+--- 10.129.112.12 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3000ms
+rtt min/avg/max/mdev = 303.804/370.104/511.707/82.598 ms
+```
+
+## Enumeration
+
+We begin our enumeration with a port scan using Nmap to identify open ports and the services running on the target machine:
+```
+$ nmap -sV 10.129.112.12
+
+Starting Nmap 7.95 ( https://nmap.org ) at 2026-07-01 16:47 IST
+Nmap scan report for 10.129.112.12
+Host is up (0.32s latency).
+Not shown: 996 closed tcp ports (conn-refused)
+PORT   STATE    SERVICE VERSION
+21/tcp open     ftp     vsftpd 3.0.3
+22/tcp open     ssh     OpenSSH 8.2p1 Ubuntu 4ubuntu0.2 (Ubuntu Linux; protocol 2.0)
+79/tcp filtered finger
+80/tcp open     http    Gunicorn
+Service Info: OSs: Unix, Linux; CPE: cpe:/o:linux:linux_kernel
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 55.27 seconds
+```
+
+Based on the Nmap results, the target is running Ubuntu Linux and has three accessible ports and one filtered port:
+- **Port 21 (ftp):** FTP Server
+- **Port 22 (ssh):** SSH Server
+- **Port 80 (http):** HTTP Server 
+
+Navigating to `10.129.112.12` displays a static website. Selecting **Security Snapshot (5 Second PCAP + Analysis)** from the left pane generates a network capture along with its analysis and provides an option to download the results. The download request is served from the endpoint `/data/1`.
+
+Since the endpoint uses a numeric identifier, it is worth testing for an Insecure Direct Object Reference (IDOR) vulnerability by requesting other IDs.
+
+Accessing `/data/0` successfully returns another user's data, confirming the presence of an IDOR vulnerability.
+
+## Foothold
+
+To gain a foothold, the first attempt was to log in anonymously to the FTP service, but it was unsuccessful.
+
+Next, the `0.pcap` file was opened in Wireshark for traffic analysis. In Wireshark, navigating to **Statistics → Protocol Hierarchy** revealed FTP traffic under **File Transfer Protocol (FTP)**.
+
+Applying a filter to isolate FTP traffic and inspecting the packets showed credentials being transmitted in cleartext. The captured username and password were `nathan` and `Buck3tH4TF0RM3!`, respectively, which can be used to authenticate to the FTP service.
+
+Login to the FTP service using the credentials `nathan:Buck3tH4TF0RM3!` and download the `user.txt` file.
+
+It is observed that write permissions are restricted over FTP, preventing file or directory uploads. Therefore, password reuse is tested against SSH access, and the same credentials successfully grant SSH access to the system.
+
+## Privilege Escalation
+
+View the kernel version:
+```
+nathan@cap:~$ uname -r
+
+5.4.0-80-generic
+```
+
+The kernel version is vulnerable to **Dirty Frag**, a local privilege escalation (LPE) vulnerability.
+
+A public proof-of-concept (PoC) is available [here](https://github.com/V4bel/dirtyfrag).
+
+Copy the contents of `exp.c` from the PoC into `/tmp/exp.c`, then compile it:
+```
+gcc -O0 -Wall -o exp exp.c -lutil
+```
+
+Finally, execute the exploit to obtain root privileges:
+```
+./exp
+```
+
+> **Note:** This is an unintended solution for the machine. However, in real-world engagements, it is possible to encounter systems running vulnerable kernel versions that can be exploited for privilege escalation. Keep in mind that kernel exploits may cause system instability or crashes, so they should be used with caution and only when appropriate.
+
+## Remediation & Recommendations
+
+* Implement proper authorization checks on object references to prevent IDOR vulnerabilities. Users should only be able to access resources they own.
+* Avoid transmitting credentials over unencrypted protocols such as FTP. Replace FTP with secure alternatives such as SFTP or FTPS.
+* Enforce unique passwords across services to prevent credential reuse between FTP and SSH.
+* Regularly patch operating systems and upgrade Linux kernels to address publicly disclosed privilege escalation vulnerabilities.
+* Restrict access to sensitive network captures and ensure packet capture files cannot be accessed by unauthorized users.
+* Conduct periodic security assessments to identify insecure protocols, access control weaknesses, and outdated software before they can be exploited.
+
+
+
