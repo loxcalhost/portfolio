@@ -41,7 +41,7 @@ The assessment began with web application enumeration, leading to the discovery 
 
 First, download the VPN configuration file from the platform and establish a connection using OpenVPN:
 ```bash
-sudo openvpn machines_au-2.ovpn
+$ sudo openvpn machines_au-2.ovpn
 ```
 
 To confirm that the target machine is reachable across the VPN, we can send a few ICMP echo requests:
@@ -97,7 +97,7 @@ Nmap done: 1 IP address (1 host up) scanned in 73.37 seconds
 
 Based on the Nmap results, the target is running Ubuntu Linux and has two accessible ports and six filtered ports:
 - **Port 22 (ssh):** SSH Server
-- **Port 443 (http):** HTTP Server
+- **Port 443 (https):** HTTPs Server
 
 Next, enumerate virtual hosts using Gobuster:
 ```bash
