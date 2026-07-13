@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import { Navigation } from "@/components/navigation";
 import { Footer } from "@/components/footer";
 import { ArticlesList } from "@/components/articles-list";
@@ -21,7 +22,9 @@ export default function ArticlesPage() {
     <div className="min-h-screen flex flex-col">
       <Navigation />
       <main className="flex-1">
-        <ArticlesList articles={articles} tags={tags} />
+        <Suspense fallback={<div className="max-w-2xl mx-auto px-4 py-20 text-muted-foreground text-sm font-mono">Loading writeups...</div>}>
+          <ArticlesList articles={articles} tags={tags} />
+        </Suspense>
       </main>
       <Footer />
     </div>

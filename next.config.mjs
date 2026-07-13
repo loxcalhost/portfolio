@@ -10,9 +10,9 @@ const prettyCodeOptions = {
 
 const withMDX = createMDX({
   options: {
-    remarkPlugins: [],
+    remarkPlugins: ['remark-gfm'],
     // Strings instead of imported plugins so Turbopack can serialize the loader options.
-    rehypePlugins: [['rehype-pretty-code', prettyCodeOptions]],
+    rehypePlugins: ['rehype-slug', ['rehype-pretty-code', prettyCodeOptions]],
   },
 })
 

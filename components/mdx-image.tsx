@@ -7,6 +7,18 @@ export function MDXImage({ src, alt, width, height, ...rest }: any) {
   const pathname = usePathname();
 
   let resolvedSrc = src;
+  const isExternal = typeof src === "string" && (src.startsWith("http://") || src.startsWith("https://"));
+
+  if (isExternal) {
+    return (
+      <img
+        src={src}
+        alt={alt ?? ""}
+        className="border border-border w-full h-auto rounded-none"
+        {...rest}
+      />
+    );
+  }
 
   // Handle relative image paths like "./images/pic.png" or "images/pic.png"
   if (typeof src === "string" && (src.startsWith("./images/") || src.startsWith("images/"))) {
@@ -27,7 +39,7 @@ export function MDXImage({ src, alt, width, height, ...rest }: any) {
       width={isStatic ? undefined : (width ?? 1200)}
       height={isStatic ? undefined : (height ?? 800)}
       sizes="(max-width: 768px) 100vw, 768px"
-      className="rounded border border-border"
+      className="border border-border rounded-none"
       {...rest}
     />
   );
