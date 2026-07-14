@@ -43,9 +43,24 @@ export function useMDXComponents(components: MDXComponents): MDXComponents {
     h3: createHeading(3),
     h4: createHeading(4),
     table: (props: any) => (
-      <div className="overflow-x-auto my-6 border border-border rounded-lg max-w-full bg-secondary/5 shadow-sm">
-        <table className="min-w-full divide-y divide-border text-sm m-0!" {...props} />
+      <div className="overflow-x-auto my-6 border border-border rounded-lg max-w-full bg-card/50 shadow-sm backdrop-blur-xs">
+        <table className="min-w-full divide-y divide-border/60 text-sm !m-0" {...props} />
       </div>
+    ),
+    thead: (props: any) => (
+      <thead className="bg-muted/40 font-semibold text-foreground" {...props} />
+    ),
+    tbody: (props: any) => (
+      <tbody className="divide-y divide-border/40" {...props} />
+    ),
+    tr: (props: any) => (
+      <tr className="hover:bg-muted/10 transition-colors" {...props} />
+    ),
+    th: (props: any) => (
+      <th className="px-4 py-3 text-left font-semibold text-foreground border-b border-border/60 align-bottom" {...props} />
+    ),
+    td: (props: any) => (
+      <td className="px-4 py-3 text-muted-foreground align-middle break-words font-normal" {...props} />
     ),
   };
 }

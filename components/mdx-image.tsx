@@ -23,9 +23,11 @@ export function MDXImage({ src, alt, width, height, ...rest }: any) {
   // Handle relative image paths like "./images/pic.png" or "images/pic.png"
   if (typeof src === "string" && (src.startsWith("./images/") || src.startsWith("images/"))) {
     const filename = src.split("/").pop();
-    if (pathname && filename) {
+    if (filename) {
       // Extract the slug from the pathname (e.g. "/blog/slug-name" -> "slug-name")
-      const slug = pathname.replace(/^\/blog\//, "").replace(/\/$/, "");
+      const slug = pathname
+        ? pathname.replace(/^\/blog\//, "").replace(/\/$/, "")
+        : "unknown";
       resolvedSrc = `/api/blog-image/${slug}/${filename}`;
     }
   }

@@ -1,4 +1,7 @@
 import createMDX from '@next/mdx'
+import remarkGfm from 'remark-gfm'
+import rehypeSlug from 'rehype-slug'
+import rehypePrettyCode from 'rehype-pretty-code'
 
 const prettyCodeOptions = {
   // Single theme works for both modes because our <pre> is always
@@ -10,9 +13,8 @@ const prettyCodeOptions = {
 
 const withMDX = createMDX({
   options: {
-    remarkPlugins: ['remark-gfm'],
-    // Strings instead of imported plugins so Turbopack can serialize the loader options.
-    rehypePlugins: ['rehype-slug', ['rehype-pretty-code', prettyCodeOptions]],
+    remarkPlugins: [remarkGfm],
+    rehypePlugins: [rehypeSlug, [rehypePrettyCode, prettyCodeOptions]],
   },
 })
 
