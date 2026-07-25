@@ -1,0 +1,55 @@
+export const frontmatter = {
+  title: "Stabilizing a Reverse Shell",
+  slug: "stabilizing_a_reverse_shell",
+  category: "Linux",
+  tags: "tty, reverse shell, script, python, wsl",
+  description:
+    "A practical guide to upgrading a basic reverse shell into a fully interactive TTY using Python, script, and a WSL-specific fallback technique.",
+  date: "2026-07-25",
+};
+
+export const metadata = {
+  title:
+    "Stabilizing a Reverse Shell | Interactive TTY & WSL Fallback | loxcalhost",
+  description:
+    "Learn how to upgrade a basic reverse shell into a fully interactive TTY using Python PTY spawning, the script command, and a WSL-specific fallback method for handling terminal control and shell interaction.",
+};
+
+# Stabilizing a Shell (Getting a Fully Functional TTY) and WSL Fallback
+
+This won't cover the technical details of *why* this works — if you want to understand the internals, check out [0xdf's video](https://www.youtube.com/watch?v=DqE6DxqJg8Q).
+
+Below are a few techniques you can use to upgrade a bare/reverse shell into a fully interactive TTY.
+
+## Method 1: Using Python
+
+```bash
+python3 -c 'import pty;pty.spawn("/bin/bash")'
+CTRL+Z
+stty raw -echo; fg
+export TERM=xterm
+```
+
+## Method 2: Using `script`
+
+```bash
+script /dev/null -c bash
+CTRL+Z
+stty raw -echo; fg
+# Terminal type? screen
+export TERM=xterm
+```
+
+## WSL Fallback
+
+If you're working from WSL and the above two methods don't work for some reason, try this instead:
+
+```bash
+python3 -c 'import pty; pty.spawn("/bin/bash")'
+ps aux | grep nc
+kill -s TSTP <PID>
+stty raw -echo; fg
+# Press Enter once or twice
+export TERM=xterm
+export SHELL=/bin/bash
+```
