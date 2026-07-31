@@ -1,0 +1,908 @@
+export const frontmatter = {
+  title: "OverTheWire Bandit Walkthrough: Levels 0 to 33",
+  slug: "overthewire-bandit-walkthrough",
+  category: "OverTheWire",
+  description:
+    "A step-by-step walkthrough of OverTheWire Bandit levels 0 to 33, covering Linux fundamentals, file handling, encoding, compression, SSH, networking, cron jobs, privilege escalation, Git, and shell escape techniques.",
+  date: "2026-01-15",
+};
+
+export const metadata = {
+  title: "OverTheWire Bandit Walkthrough | Linux & Cybersecurity",
+  description:
+    "A complete OverTheWire Bandit walkthrough covering levels 0 to 33 with practical Linux commands, SSH, file analysis, encoding, compression, cron jobs, privilege escalation, Git, and shell escape techniques.",
+};
+
+# OverTheWire: Bandit — Walkthrough
+
+Passwords are intentionally shown as `▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇` — solve it yourself and you'll get the real value. Every level follows the same pattern: SSH in as `banditN` using the password found in the previous level, solve a small challenge, and that gives you the password for `banditN+1`.
+
+Connection template used throughout:
+
+```bash
+ssh banditN@bandit.labs.overthewire.org -p 2220
+```
+
+---
+
+## Level 0 → 1
+
+Connect with the known starting credentials (user `bandit0`, password `bandit0`):
+
+```bash
+ssh bandit0@bandit.labs.overthewire.org -p 2220
+```
+
+Read the `readme` file in the home directory:
+
+```bash
+cat readme
+```
+
+```text
+The password you are looking for is: ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+That password logs you in as `bandit1`.
+
+---
+
+## Level 1 → 2
+
+Log in as `bandit1`. `ls` shows a single file, literally named `-`.
+
+Running `cat -` doesn't work the way you'd expect: to most commands (and to the shell itself),
+a lone `-` argument conventionally means "read from standard input," not "the file named `-`."
+So `cat -` just hangs, waiting for you to type something, instead of opening the file.
+
+To force `cat` to treat it as a filename, either give an explicit path (`./-`) or use input
+redirection (`<`), which never goes through argument parsing:
+
+```bash
+cat ./-
+# or
+cat < -
+```
+
+```text
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+---
+
+## Level 2 → 3
+
+Log in as `bandit2`. `ls` shows a file named `--spaces in this filename--`.
+
+Two problems here: the name contains spaces, and it starts with dashes, which `cat` would try
+to interpret as command-line flags. Quoting the name solves the spaces problem; using `./` or
+`<` solves the leading-dash problem:
+
+```bash
+cat "./--spaces in this filename--"
+# or
+cat < "--spaces in this filename--"
+```
+
+```text
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+---
+
+## Level 3 → 4
+
+Log in as `bandit3`. `ls` shows a directory, `inhere`. Inside it, a plain `ls` shows nothing —
+because the file is hidden. In Linux, any filename starting with `.` is hidden from a normal
+`ls` listing. Use `-a` ("all") to reveal it:
+
+```bash
+cd inhere
+ls -a
+```
+
+```text
+.  ..  ...Hiding-From-You
+```
+
+```bash
+cat "...Hiding-From-You"
+```
+
+```text
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+---
+
+## Level 4 → 5
+
+Log in as `bandit4`. Inside `inhere` there are ten files, `-file00` through `-file09`, and only
+one is human-readable text — the rest are decoys with binary/junk content.
+
+Use `file` to identify the type of every file at once:
+
+```bash
+file ./*
+```
+
+The output labels each file's type (e.g. `data`, `ASCII text`, etc.). Only one comes back as
+`ASCII text` — that's the password file. Because the names start with `-`, use `./` when
+reading it:
+
+```bash
+cat ./-file07
+```
+
+```text
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+---
+
+## Level 5 → 6
+
+Log in as `bandit5`. Inside `inhere` are 20 directories (`maybehere00`–`maybehere19`), each
+containing several decoy files. The real password file has three known properties:
+
+1. Human-readable
+2. Exactly **1033 bytes**
+3. Not executable
+
+You don't need to filter on all three — size alone is usually enough to narrow it to one file.
+Use `find` (not `file`) to search recursively by size:
+
+```bash
+find . -type f -size 1033c
+```
+
+```text
+./maybehere07/.file2
+```
+
+**Note (added explanation):** `-size 1033c` means "1033 bytes exactly" (the `c` suffix is
+"bytes"; without it, `find` measures in 512-byte blocks). If you wanted to add the other two
+criteria for extra certainty: `find . -type f -size 1033c ! -executable`.
+
+```bash
+cat ./maybehere07/.file2
+```
+
+```text
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+---
+
+## Level 6 → 7
+
+Log in as `bandit6`. This time the file could be anywhere on the whole filesystem, but it has
+three identifying traits: owned by user `bandit7`, group `bandit6`, and exactly 33 bytes.
+
+```bash
+find / -type f -size 33c -user bandit7 -group bandit6 2>/dev/null
+```
+
+**Note (added explanation):** `2>/dev/null` discards stderr, so the thousands of
+"Permission denied" errors from directories you can't read don't bury the real result.
+
+```text
+/var/lib/dpkg/info/bandit7.password
+```
+
+```bash
+cat /var/lib/dpkg/info/bandit7.password
+```
+
+```text
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+---
+
+## Level 7 → 8
+
+Log in as `bandit7`. The password sits in `data.txt`, on the line next to the word `millionth`.
+
+```bash
+grep millionth data.txt
+```
+
+```text
+millionth    ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+---
+
+## Level 8 → 9
+
+Log in as `bandit8`. The password is the one line in `data.txt` that appears **exactly once**;
+every other line is duplicated.
+
+```bash
+sort data.txt | uniq -u
+```
+
+**Note (added explanation):** `uniq` only removes duplicate lines that are *adjacent* to each
+other — that's why `sort` has to run first, to group identical lines together. `uniq -u` then
+prints only the lines that had no neighboring duplicate, i.e. the ones that occur exactly once.
+
+```text
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+---
+
+## Level 9 → 10
+
+Log in as `bandit9`. `data.txt` is mostly binary junk with a few readable strings mixed in; the
+password is preceded by a run of `=` characters.
+
+```bash
+file data.txt
+```
+
+```text
+data.txt: data
+```
+
+`strings` pulls out the printable text embedded in a binary file:
+
+```bash
+strings data.txt | grep '=='
+```
+
+```text
+========== ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+---
+
+## Level 10 → 11
+
+Log in as `bandit10`. `data.txt` contains Base64-encoded data (the trailing `==` padding is a
+giveaway).
+
+```bash
+cat data.txt
+```
+
+```text
+VGhlIHBhc3N3b3JkIGlzIC4uLg==
+```
+
+```bash
+base64 -d data.txt
+```
+
+```text
+The password is ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+---
+
+## Level 11 → 12
+
+Log in as `bandit11`. `data.txt` has every letter rotated 13 places through the alphabet
+(ROT13) — a classic simple substitution cipher.
+
+```bash
+tr 'A-Za-z' 'N-ZA-Mn-za-m' < data.txt
+```
+
+**Note (added explanation):** `tr` here maps each letter to the one 13 positions later,
+wrapping around (`A-Z` → `N-ZA-M`, and same for lowercase). Since ROT13 is its own inverse,
+running the same command again would re-encode it.
+
+```text
+The password is ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+---
+
+## Level 12 → 13
+
+Log in as `bandit12`. `data.txt` is a **hexdump** of a file that's been compressed multiple
+times, layer after layer. Work in a scratch directory since your home dir here isn't
+guaranteed writable for this kind of churn:
+
+```bash
+mkdir /tmp/work && cd /tmp/work
+cp ~/data.txt .
+```
+
+**Note (added explanation) — the full process:** A hexdump is a text representation of binary
+data as hex byte pairs (e.g. `1f 8b 08 00 ...`). `xxd -r` reverses a hexdump back into the
+original binary bytes. From there, `file` tells you the current compression format, and you
+repeat: rename with the right extension → decompress → check the type again → repeat, until
+`file` finally reports plain text.
+
+```bash
+xxd -r data.txt > layer0
+file layer0        # gzip compressed data
+mv layer0 layer0.gz && gunzip layer0.gz    # -> layer0
+
+file layer0        # bzip2 compressed data
+mv layer0 layer0.bz2 && bunzip2 layer0.bz2 # -> layer0
+
+file layer0        # gzip compressed data (again)
+mv layer0 layer0.gz && gunzip layer0.gz
+
+file layer0        # POSIX tar archive
+mv layer0 layer0.tar && tar -xf layer0.tar   # extracts a new file, e.g. data5.bin
+
+file data5.bin      # POSIX tar archive
+tar -xf data5.bin    # -> data6.bin
+
+file data6.bin      # POSIX tar archive
+tar -xf data6.bin    # -> data8.bin
+
+file data8.bin      # gzip compressed data
+mv data8.bin data8.gz && gunzip data8.gz    # -> data8
+
+file data8          # ASCII text  <-- done
+cat data8
+```
+
+The exact chain of formats (gzip/bzip2/tar, how many rounds) can vary a bit run to run — the
+method is what matters: `file`, rename to match, decompress/extract, repeat until you get
+`ASCII text`.
+
+```text
+The password is ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+---
+
+## Level 13 → 14
+
+Log in as `bandit13`. This level's password can only be read by user `bandit14` — you don't
+get a plaintext password at all, but a private SSH key that logs you straight in as `bandit14`.
+
+The home directory contains `sshkey.private`. Copy it out and use it to log in directly with
+the `-i` (identity file) flag:
+
+```bash
+chmod 600 sshkey.private
+ssh -i sshkey.private bandit14@bandit.labs.overthewire.org -p 2220
+```
+
+Once in as `bandit14`, the password lives at the usual path but under this user's own
+protected file:
+
+```bash
+cat /etc/bandit_pass/bandit14
+```
+
+```text
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+---
+
+## Level 14 → 15
+
+Log in as `bandit14` (reusing the SSH key from the previous level). This time, instead of a
+file, you submit the current password over a raw TCP connection to a local port to receive the
+next one.
+
+```bash
+cat /etc/bandit_pass/bandit14 | nc localhost 30000
+```
+
+```text
+Correct!
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+---
+
+## Level 15 → 16
+
+Log in as `bandit15`. Same idea as the last level, but port 30001 requires SSL/TLS — a plain
+`nc` connection won't complete the handshake. Use `openssl s_client` instead:
+
+```bash
+echo "<bandit15_password>" | openssl s_client -connect localhost:30001 -quiet
+```
+
+**Note (added explanation):** the self-signed certificate warnings (`verify error:num=18`) are
+expected and safe to ignore here — it's a lab server, not a real service you need to trust.
+
+```text
+Correct!
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+---
+
+## Level 16 → 17
+
+Log in as `bandit16`. The next password comes from *one* server listening somewhere in the
+port range 31000–32000. Most of the listeners on that range are decoys that just echo back
+whatever you send; only one, over SSL, will hand back real credentials.
+
+**Step 1 — find which ports are open:**
+
+```bash
+nmap -p 31000-32000 localhost
+```
+
+```text
+PORT      STATE SERVICE
+31046/tcp open  unknown
+31518/tcp open  unknown
+31691/tcp open  unknown
+31790/tcp open  unknown
+31960/tcp open  unknown
+```
+
+**Step 2 — figure out which of those speak SSL/TLS.** `nmap -sV` version detection may not
+work reliably in this sandboxed network, so the practical approach is to just try each port
+with `openssl s_client`; a plaintext-only port will hang or error out instead of completing a
+TLS handshake:
+
+```bash
+for port in 31046 31518 31691 31790 31960; do
+  echo "== $port ==" 
+  echo "" | timeout 3 openssl s_client -connect localhost:$port 2>&1 | grep -E "Connecting|error"
+done
+```
+
+Two ports (in this run, `31518` and `31790`) complete a real TLS handshake. Send the current
+password to each and see which one responds with a private key instead of just echoing back:
+
+```bash
+echo "<bandit16_password>" | openssl s_client -connect localhost:31790 -quiet
+```
+
+```text
+Correct!
+-----BEGIN OPENSSH PRIVATE KEY-----
+...
+-----END OPENSSH PRIVATE KEY-----
+```
+
+Save that key, `chmod 600` it, and use it to log in as `bandit17`.
+
+---
+
+## Level 17 → 18
+
+Log in as `bandit17` (via the key from the previous level). There are two files in the home
+directory, `passwords.old` and `passwords.new`. The next password is the one line that
+differs between them.
+
+```bash
+diff passwords.old passwords.new
+```
+
+```text
+42c42
+< <old_line>
+---
+> ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+---
+
+## Level 18 → 19
+
+Log in as `bandit18`. Someone has modified this account's `.bashrc` to log you out immediately
+whenever you connect interactively — so a normal `ssh` session never gives you a shell.
+
+The fix: SSH lets you pass a command to run remotely instead of starting an interactive shell.
+That command executes over the connection before `.bashrc` (which only fires for interactive
+login shells) gets a chance to kick you out:
+
+```bash
+ssh bandit18@bandit.labs.overthewire.org -p 2220 "cat readme"
+```
+
+```text
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+**Note (added explanation):** normally `ssh` does `connect → start shell → run .bashrc → give
+you a prompt`. Passing a command instead does `connect → run that one command → disconnect`,
+skipping the interactive shell (and the `.bashrc` trap) entirely. If you needed an actual
+interactive shell here rather than one command, you could do
+`ssh bandit18@... -p 2220 "/bin/bash --noprofile --norc"` to bypass the startup files.
+
+---
+
+## Level 19 → 20
+
+Log in as `bandit19`. The home directory has a **setuid** binary, `bandit20-do`.
+
+```bash
+ls -la
+```
+
+```text
+-rwsr-x---   1 bandit20 bandit19 14880 ... bandit20-do
+```
+
+**Note (added explanation):** the `s` in `-rwsr-x---` (in place of the usual `x` in the
+owner's permission bits) marks this as a setuid binary. When executed, it runs with the
+privileges of its *owner* (`bandit20`), not the user who invoked it (`bandit19`) — so it can
+read files `bandit19` normally couldn't.
+
+```bash
+./bandit20-do cat /etc/bandit_pass/bandit20
+```
+
+```text
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+---
+
+## Level 20 → 21
+
+Log in as `bandit20`. The home directory has a setuid binary, `suconnect`, that connects out to
+localhost on a port you specify, reads a line of text from that connection, and — if it matches
+the current level's password — sends back the password for `bandit21`.
+
+So you need a listener already running on that port, holding the current password, before
+`suconnect` connects to it:
+
+```bash
+echo -n "<bandit20_password>" | nc -l -p 1234 &
+./suconnect 1234
+```
+
+```text
+Read: <bandit20_password>
+Password matches, sending next password
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+---
+
+## Level 21 → 22
+
+Log in as `bandit21`. A cron job runs periodically and does something useful; find its config
+in `/etc/cron.d/`.
+
+```bash
+ls /etc/cron.d/
+cat /etc/cron.d/cronjob_bandit22
+```
+
+```text
+* * * * * bandit22 /usr/bin/cronjob_bandit22.sh &> /dev/null
+```
+
+That runs every minute, as `bandit22`. Inspect the script it calls:
+
+```bash
+cat /usr/bin/cronjob_bandit22.sh
+```
+
+```bash
+#!/bin/bash
+chmod 644 /tmp/t7O6lds9S0RqQh9aMcz6ShpAoZKF7fgv
+cat /etc/bandit_pass/bandit22 > /tmp/t7O6lds9S0RqQh9aMcz6ShpAoZKF7fgv
+```
+
+It writes `bandit22`'s password to a world-readable temp file every minute:
+
+```bash
+cat /tmp/t7O6lds9S0RqQh9aMcz6ShpAoZKF7fgv
+```
+
+```text
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+---
+
+## Level 22 → 23
+
+Log in as `bandit22`. Same pattern — check `/etc/cron.d/cronjob_bandit23`, which points at
+`/usr/bin/cronjob_bandit23.sh`:
+
+```bash
+#!/bin/bash
+myname=$(whoami)
+mytarget=$(echo I am user $myname | md5sum | cut -d ' ' -f 1)
+echo "Copying passwordfile /etc/bandit_pass/$myname to /tmp/$mytarget"
+cat /etc/bandit_pass/$myname > /tmp/$mytarget
+```
+
+This one is trickier: the output filename is the MD5 hash of the string
+`"I am user bandit23"`, computed at runtime by the script running *as* `bandit23`. You can
+reproduce that hash yourself, since `myname` will always be `bandit23` when the cron job runs:
+
+```bash
+echo I am user bandit23 | md5sum | cut -d ' ' -f 1
+```
+
+```text
+8ca319486bfbbc3663ea0fbe81326349
+```
+
+```bash
+cat /tmp/8ca319486bfbbc3663ea0fbe81326349
+```
+
+```text
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+---
+
+## Level 23 → 24
+
+Log in as `bandit23`. Check `/etc/cron.d/cronjob_bandit24` → `/usr/bin/cronjob_bandit24.sh`:
+
+```bash
+#!/bin/bash
+shopt -s nullglob
+myname=$(whoami)
+cd /var/spool/"$myname"/foo || exit
+for i in * .*; do
+    if [ "$i" != "." ] && [ "$i" != ".." ]; then
+        owner="$(stat --format "%U" "./$i")"
+        if [ "${owner}" = "bandit23" ] && [ -f "$i" ]; then
+            timeout -s 9 60 "./$i"
+        fi
+        rm -rf "./$i"
+    fi
+done
+```
+
+This job runs, as `bandit24`, any file you drop into `/var/spool/bandit24/foo/` — as long as
+*you* (`bandit23`) own that file. It deletes the file right after, so you only get one shot per
+minute. Drop in a script that copies the password somewhere you can read:
+
+```bash
+mkdir -p /tmp/work && cd /tmp/work
+cat > steal.sh << 'EOF'
+#!/bin/bash
+cat /etc/bandit_pass/bandit24 > /tmp/work/pass24
+EOF
+chmod +x steal.sh
+cp steal.sh /var/spool/bandit24/foo/
+sleep 60
+cat /tmp/work/pass24
+```
+
+```text
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+---
+
+## Level 24 → 25
+
+Log in as `bandit24`. A daemon on port 30002 wants the current password plus a secret 4-digit
+PIN on one line. There's no shortcut to the PIN besides trying all 10,000 combinations.
+
+```bash
+for i in $(seq -w 0 9999); do
+  echo "<bandit24_password> $i"
+done | nc localhost 30002 | grep -v "^Wrong"
+```
+
+**Note (added explanation):** the daemon accepts one line per connection normally, but piping
+all 10,000 guesses into a single persistent `nc` session lets it read them in sequence without
+reconnecting 10,000 times. `grep -v "^Wrong"` filters out the thousands of rejection lines so
+only the success message (and the new password) survives.
+
+```text
+Correct!
+The password of user bandit25 is ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+---
+
+## Level 25 → 26
+
+Log in as `bandit25` (an SSH key, `bandit26.sshkey`, is provided for `bandit26`). Logging into
+`bandit26` normally won't give you a shell — check why:
+
+```bash
+grep bandit26 /etc/passwd
+```
+
+```text
+bandit26:x:11026:11026:bandit level 26:/home/bandit26:/usr/bin/showtext
+```
+
+`bandit26`'s login shell isn't `/bin/bash`, it's a custom program. Look at it:
+
+```bash
+cat /usr/bin/showtext
+```
+
+```bash
+#!/bin/sh
+export TERM=linux
+exec more ~/text.txt
+exit 0
+```
+
+It just pages through `text.txt` with `more` and exits — closing your session the moment the
+file finishes displaying (or you quit).
+
+**Note (added explanation) — the escape:** shrink your terminal window to a handful of lines
+*before* connecting, so `text.txt` doesn't fit on screen and `more` pauses at a `--More--`
+prompt instead of finishing immediately. From there:
+
+1. Connect: `ssh -i bandit26.sshkey bandit26@bandit.labs.overthewire.org -p 2220`
+2. At the `--More--` prompt, press `v`. `more`'s built-in shortcut opens the current file in
+   the `vi` editor.
+3. Inside `vi`, change the default shell and drop into it:
+   ```
+   :set shell=/bin/bash
+   :shell
+   ```
+
+---
+
+## Level 26 → 27
+
+Continuing directly from the shell escape above, the home directory has `bandit27-do`, a
+setuid binary owned by `bandit27` (group `bandit26`):
+
+```bash
+./bandit27-do cat /etc/bandit_pass/bandit27
+```
+
+```text
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+---
+
+## Level 27 → 28
+
+There's a git repository at
+`ssh://bandit27-git@bandit.labs.overthewire.org:2220/home/bandit27-git/repo`. The
+`bandit27-git` password is the same as `bandit27`'s. **Clone it from your local machine**, not
+from inside the bandit server:
+
+```bash
+git clone ssh://bandit27-git@bandit.labs.overthewire.org:2220/home/bandit27-git/repo
+cat repo/README.md
+```
+
+```text
+The password to the next level is: ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+---
+
+## Level 28 → 29
+
+Same setup, next repo, next user:
+
+```bash
+git clone ssh://bandit28-git@bandit.labs.overthewire.org:2220/home/bandit28-git/repo
+cat repo/README.md
+```
+
+This time the password field is blank/redacted in the current `README.md` — the real value
+was removed in a later commit. Git never truly deletes history, so check the log for the file:
+
+```bash
+cd repo
+git log -p README.md
+```
+
+An earlier commit (before one titled "fix info leak") still shows the password in a diff:
+
+```diff
+- password: ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
++ password: xxxxxxxxxx
+```
+
+---
+
+## Level 29 → 30
+
+```bash
+git clone ssh://bandit29-git@bandit.labs.overthewire.org:2220/home/bandit29-git/repo
+cd repo
+cat README.md
+```
+
+The password field here says something like `<no passwords in production!>` — a hint that a
+non-production branch still has it. List all branches, including remotes:
+
+```bash
+git branch -a
+```
+
+```text
+* master
+  remotes/origin/dev
+  remotes/origin/master
+  remotes/origin/sploits-dev
+```
+
+```bash
+git checkout dev
+cat README.md
+```
+
+```text
+- password: ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+---
+
+## Level 30 → 31
+
+```bash
+git clone ssh://bandit30-git@bandit.labs.overthewire.org:2220/home/bandit30-git/repo
+cd repo
+cat README.md
+```
+
+This one is genuinely empty, and neither commit history nor branches have anything useful.
+The remaining place to check is **tags** — in Git, tags usually mark release points, but
+they can just as easily point at an orphan commit that holds hidden data:
+
+```bash
+git tag
+git show secret
+```
+
+```text
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+---
+
+## Level 31 → 32
+
+```bash
+git clone ssh://bandit31-git@bandit.labs.overthewire.org:2220/home/bandit31-git/repo
+cd repo
+cat README.md
+```
+
+```text
+This time your task is to push a file to the remote repository.
+    File name: key.txt
+    Content: 'May I come in?'
+    Branch: master
+```
+
+A `.gitignore` in the repo blocks all `.txt` files from being added normally, so `git add`
+silently does nothing. Force it past the ignore rule:
+
+```bash
+echo "May I come in?" > key.txt
+git add -f key.txt
+git commit -m "add key.txt"
+git push
+```
+
+```text
+remote: Well done! Here is the password for the next level:
+remote: ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+---
+
+## Level 32 → 33
+
+Connecting as `bandit32` drops you into a custom "UPPERCASE SHELL" — every command you type
+gets converted to uppercase before execution. Since Linux is case-sensitive, `LS`, `CAT`, etc.
+are unrecognized, and you can't type your way out normally.
+
+**Note (added explanation) — the escape:** `$0` is a special shell variable that always
+expands to the name of the currently running shell/process. It contains no alphabetic
+characters, so the uppercase filter has nothing to transform — it passes through untouched,
+and evaluating it drops you into the underlying real shell (`sh`).
+
+```text
+>> $0
+$ cat /etc/bandit_pass/bandit33
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
