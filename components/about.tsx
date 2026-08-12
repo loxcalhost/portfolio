@@ -21,6 +21,8 @@ export function About() {
         "Penetration Testing",
         "Linux Internals",
         "CTF",
+	"Hardware",
+	"ICS/OT Security",
       ],
     },
   ];
