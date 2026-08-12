@@ -25,7 +25,7 @@ Below are a few techniques you can use to upgrade a bare/reverse shell into a fu
 
 ```bash
 python3 -c 'import pty;pty.spawn("/bin/bash")'
-CTRL+Z
+# Hit CTRL+Z to background
 stty raw -echo; fg
 export TERM=xterm
 ```
@@ -34,7 +34,7 @@ export TERM=xterm
 
 ```bash
 script /dev/null -c bash
-CTRL+Z
+# Hit CTRL+Z to background
 stty raw -echo; fg
 # Terminal type? screen
 export TERM=xterm
@@ -46,6 +46,7 @@ If you're working from WSL and the above two methods don't work for some reason,
 
 ```bash
 python3 -c 'import pty; pty.spawn("/bin/bash")'
+# Hit CTRL+Z to background
 ps aux | grep nc
 kill -s TSTP <PID>
 stty raw -echo; fg
