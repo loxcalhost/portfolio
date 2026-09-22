@@ -1,17 +1,10 @@
 export function Education() {
   const education = [
     {
-      degree: "Class 12th",
-      school: "Shevgaon English Medium School & Jr. College",
+      degree: "Under Graduate",
+      school: "Atharva College of Engineering",
       // school: "College",
-      graduation: "2025—Present",
-      // details: "Relevant coursework in cybersecurity, networks, and systems.",
-    },
-    {
-      degree: "Class 10th",
-      school: "Dr. Balasaheb Vikhe Patil CBSE School",
-      // school: "College",
-      graduation: "2023—2024",
+      graduation: "2026—Present",
       // details: "Relevant coursework in cybersecurity, networks, and systems.",
     },
   ];

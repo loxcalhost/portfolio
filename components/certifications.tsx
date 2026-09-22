@@ -1,8 +1,8 @@
 export function Certifications() {
   const certs = [
     {
-      name: "eLearnSecurity Junior Penetration Tester (eJPT)",
-      issuer: "eLearnSecurity",
+      name: "Certified Penetration Testing Specialist (CPTS)",
+      issuer: "Hack The Box",
       year: "Upcoming",
       credential: "#",
     },
