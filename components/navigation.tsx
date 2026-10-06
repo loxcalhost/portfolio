@@ -8,6 +8,7 @@ import { ThemeToggle } from "./theme-toggle";
 const navItems = [
   { label: "Writing", href: "/#writing" },
   { label: "Projects", href: "/#projects" },
+  { label: "Achievements", href: "/#achievements" },
   { label: "Certs", href: "/#certifications" },
   { label: "Education", href: "/#education" },
   { label: "Contact", href: "/#contact" },
