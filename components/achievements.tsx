@@ -15,6 +15,11 @@ export function Achievements() {
       description: "Ranked 72nd and won a Caido voucher.",
       credential: "https://hackwithindia.com/leaderboard",
     },
+    {
+      name: "HTB Cyber Apocalypse CTF 2026",
+      description: "Ranked 516th as a team.",
+      credential: "https://res.cloudinary.com/dbe72hpba/image/upload/v1791468549/certificate_page-1_xxrt9m.png",
+    },
   ];
 
   return (
